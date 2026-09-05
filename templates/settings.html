@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}设置 — 学生课堂数据整合系统{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>DeepSeek API 设置</h2>
+  <p class="muted">用于生成学生评价。API key 保存在本地数据库，不会上传到任何第三方。</p>
+  <p class="muted">获取 API key：<a href="https://platform.deepseek.com/api_keys" target="_blank">DeepSeek 开放平台</a></p>
+
+  {% if has_key %}
+  <div class="flash flash-success">当前已配置 API key：{{ masked_key }}</div>
+  {% else %}
+  <div class="flash flash-error">尚未配置 API key，请填写后再使用评价功能。</div>
+  {% endif %}
+
+  <form method="post" class="settings-form">
+    <label for="api_key">API Key</label>
+    <input type="password" name="api_key" id="api_key" placeholder="sk-..." autocomplete="off">
+    <button type="submit" class="btn btn-primary">保存</button>
+  </form>
+</section>
+{% endblock %}
