@@ -8,6 +8,7 @@
 """
 # io 提供 BytesIO：把字节流当成“文件”来读写，pandas 可以直接从内存读取，无需落盘。
 import io
+import re  # 用于从课节名里提取 P1/P2 等短名字
 from collections import defaultdict  # defaultdict：访问不存在的键时自动创建默认值
 from datetime import datetime
 
@@ -419,6 +420,113 @@ def progress_for_class(records, roster):
         key=lambda x: x["开课时间"],
     )
     return {"rows": rows, "class_sessions": class_sessions}
+
+
+# ---------------- 课节排行 ----------------
+
+def band_of(avg):
+    """按平均正确率判定颜色/状态等级（供课节排行用）。"""
+    if avg >= HIGH_ACC:
+        return "high"
+    if avg >= LOW_ACC:
+        return "mid"
+    return "low"
+
+
+def rankings_for_class(records):
+    """计算「某班级各课节」的正确率排名与奖杯排名。
+
+    以 (课节名称, 开课时间) 为一个课节会话，统计该会话内全班学生：
+    平均正确率、人数、总奖杯数、总出勤奖杯数与等级（high/mid/low），
+    并分别按「平均正确率」「总奖杯数」降序给出排名。
+
+    返回: {lessons: [{fname, time, key, avg, count, trophies, attend, band,
+                      rank_acc, rank_trophy, short}]}
+    key 是唯一标识（fname + '@' + time）；short 是便于展示的短课节名。
+    """
+    by_sess = defaultdict(list)
+    for r in records:
+        by_sess[(r["课节名称"], r["开课时间"])].append(r)
+
+    lessons = []
+    for (fname, time), rows in by_sess.items():
+        avg = round(_mean([x["得分率"] for x in rows]), 4)
+        lessons.append(
+            {
+                "fname": fname,          # 完整课节名（如「P1」「先导课 U260724」）
+                "time": time,
+                "key": f"{fname}@{time}",# 唯一标识，前端用来定位该课节
+                "avg": avg,
+                "count": len(rows),
+                "trophies": sum(x["奖杯数"] for x in rows),
+                "attend": sum(x["出勤总奖杯数"] for x in rows),
+                "band": band_of(avg),
+                "short": _short_lesson(fname),
+            }
+        )
+
+    # 先按开课时间排成日程顺序，再据此分配正确率/奖杯排名（排名不依赖时间顺序）
+    lessons.sort(key=lambda l: l["time"])
+    for rank, i in enumerate(sorted(range(len(lessons)), key=lambda i: lessons[i]["avg"], reverse=True), 1):
+        lessons[i]["rank_acc"] = rank
+    for rank, i in enumerate(sorted(range(len(lessons)), key=lambda i: lessons[i]["trophies"], reverse=True), 1):
+        lessons[i]["rank_trophy"] = rank
+    return {"lessons": lessons}
+
+
+def _short_lesson(name):
+    """把完整课节名缩写为简短的展示名（与进步曲线里 shortLesson 逻辑一致）。"""
+    if not name:
+        return ""
+    if "先导课" in name:
+        return "先导课"
+    m = re.match(r"^(P\d+)", name)
+    return m.group(1) if m else name[:8]
+
+
+def cross_class_rankings(class_records):
+    """计算「同一课节跨班级」的正确率/奖杯对比。
+
+    class_records: [{class_id, class_name, records, ...}]（一般不含「默认名单」）。
+    以课节名（如 P1）为单位，统计每个班在该课节的均分/人数/奖杯。
+
+    返回: {lessons: [{fname, time, classes: {class_id: {avg,count,trophies,attend,band}}}],
+           classes: [{id, name}]}
+    """
+    by_lesson = {}    # {课节名: {fname, time, classes: {cid: {...}}}}
+    class_meta = []
+    for cr in class_records:
+        class_meta.append({"id": cr["class_id"], "name": cr["class_name"]})
+        for r in cr["records"]:
+            fname = r["课节名称"]
+            time = r["开课时间"]
+            if fname not in by_lesson:
+                by_lesson[fname] = {"fname": fname, "time": "", "classes": {}}
+            slot = by_lesson[fname]
+            if time and (not slot["time"] or time < slot["time"]):
+                slot["time"] = time  # 取该课节最早出现的时间作排序依据
+            cell = slot["classes"].setdefault(
+                str(cr["class_id"]), {"accs": [], "trophies": 0, "attend": 0}
+            )
+            cell["accs"].append(r["得分率"])
+            cell["trophies"] += r["奖杯数"]
+            cell["attend"] += r["出勤总奖杯数"]
+
+    lessons = []
+    for fname, slot in by_lesson.items():
+        cells = {}
+        for cid, cell in slot["classes"].items():
+            avg = round(_mean(cell["accs"]), 4)
+            cells[cid] = {
+                "avg": avg,
+                "count": len(cell["accs"]),
+                "trophies": cell["trophies"],
+                "attend": cell["attend"],
+                "band": band_of(avg),
+            }
+        lessons.append({"fname": fname, "time": slot["time"], "classes": cells})
+    lessons.sort(key=lambda l: l["time"])
+    return {"lessons": lessons, "classes": class_meta}
 
 
 # ---------------- 导出 ----------------

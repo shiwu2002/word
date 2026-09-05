@@ -25,6 +25,7 @@
     <button class="tab" data-tab="summary">学生汇总</button>
     <button class="tab" data-tab="detail">明细记录</button>
     <button class="tab" data-tab="progress">进步曲线</button>
+    <button class="tab" data-tab="rank">课节排行</button>
     <button class="tab" data-tab="eval">学生评价</button>
     <button class="tab" data-tab="history">版本历史</button>
   </nav>
@@ -247,6 +248,107 @@
     </div>
   </section>
 
+  <!-- ========== Tab 4.5：课节排行（每节课每个班的正确率/奖杯排行） ========== -->
+  <section class="tab-panel" id="tab-rank">
+    <nav class="subtabs">
+      <button class="subtab active" data-subtab="lessons">本班课节排行</button>
+      <button class="subtab" data-subtab="students">每课节学生</button>
+      <button class="subtab" data-subtab="cross">各班对比</button>
+    </nav>
+
+    <!-- 子页 1：本班课节排行 -->
+    <section class="subtab-panel active" id="subtab-lessons">
+      {% if rankings.lessons %}
+      <div class="card">
+        <div class="card-head">
+          <h2>本班课节排行 <span class="muted small">每节课的平均正确率与总奖杯数排名</span></h2>
+          <div class="inline-form">
+            <label class="muted small" for="rankSort">排序依据</label>
+            <select id="rankSort">
+              <option value="acc">正确率</option>
+              <option value="trophy">奖杯数</option>
+            </select>
+          </div>
+        </div>
+        <p class="muted">柱越长代表数值越高；颜色区分该课节的正确率等级（<span class="tag tag-green">≥80% 高</span> <span class="tag" style="background:var(--warn)">50–79% 中</span> <span class="tag" style="background:var(--danger)">&lt;50% 低</span>）。表格同时给出「正确率排名」与「奖杯排名」两列。</p>
+        <div class="rank-chart" id="rankChart"></div>
+        <div class="table-scroll">
+          <table class="data-table" id="rankTable">
+            <thead>
+              <tr>
+                <th>正确率排名</th><th>课节</th><th>平均正确率</th><th>等级</th><th>人数</th>
+                <th>总奖杯数</th><th>奖杯排名</th><th>总出勤奖杯</th>
+              </tr>
+            </thead>
+            <tbody id="rankTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="card"><p class="empty">该班级暂无课时数据，先到「数据导入」上传后再看课节排行。</p></div>
+      {% endif %}
+    </section>
+
+    <!-- 子页 2：每课节学生排行 -->
+    <section class="subtab-panel" id="subtab-students">
+      {% if rankings.lessons %}
+      <div class="card">
+        <div class="card-head">
+          <h2>每课节学生排行 <span class="muted small">看某节课里谁的正确率/奖杯领先</span></h2>
+          <div class="inline-form">
+            <label class="muted small" for="rankLesson">选择课节</label>
+            <select id="rankLesson"></select>
+          </div>
+        </div>
+        <div class="inline-form rank-student-switch">
+          <label class="muted small">按</label>
+          <select id="rankStudentSort">
+            <option value="acc">正确率</option>
+            <option value="trophy">奖杯数</option>
+          </select>
+          <span class="muted small">排序</span>
+        </div>
+        <div class="rank-chart rank-chart-sm" id="rankStudentChart"></div>
+        <div class="table-scroll">
+          <table class="data-table" id="rankStudentTable">
+            <thead>
+              <tr><th>排名</th><th>学生姓名</th><th>正确数</th><th>得分率</th><th>等级</th><th>奖杯数</th><th>出勤总奖杯</th></tr>
+            </thead>
+            <tbody id="rankStudentTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="card"><p class="empty">该班级暂无课时数据，先到「数据导入」上传后再看学生排行。</p></div>
+      {% endif %}
+    </section>
+
+    <!-- 子页 3：各班对比 -->
+    <section class="subtab-panel" id="subtab-cross">
+      {% if cross_class.lessons %}
+      <div class="card">
+        <div class="card-head">
+          <h2>各班对比 <span class="muted small">同一课节跨班级比较平均正确率（差异越大越值得关注）</span></h2>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="crossTable">
+            <thead>
+              <tr>
+                <th>课节</th>
+                {% for cl in cross_class.classes %}<th>{{ cl.name }} 均分</th>{% endfor %}
+                <th>最优班级</th>
+              </tr>
+            </thead>
+            <tbody id="crossTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      {% else %}
+      <div class="card"><p class="empty">暂无足够数据做跨班对比。</p></div>
+      {% endif %}
+    </section>
+  </section>
+
   <!-- ========== Tab 5：学生评价 ========== -->
   <section class="tab-panel" id="tab-eval">
     <div class="card">
@@ -404,8 +506,9 @@
       try { sessionStorage.setItem(TAB_KEY, name); } catch (e) {}
       history.replaceState(null, '', '#tab-' + name);
     }
-    // 进步曲线在面板隐藏时宽度为 0，切到该页时重新渲染一次，避免图空
+    // 进步曲线/课节排行在面板隐藏时宽度为 0，切到该页时重新渲染一次，避免图空
     if (name === 'progress' && window.renderCurrentProgress) window.renderCurrentProgress();
+    if (name === 'rank' && window.renderCurrentRank) window.renderCurrentRank();
   }
 
   const tabButtons = document.querySelectorAll('.tab');
@@ -643,6 +746,161 @@
         if (tr) selectProgressStudent(tr.dataset.student);
       });
     }
+  }
+
+  // ---------------- 课节排行 ----------------
+  const RK = {{ rankings|tojson }};
+  const CC = {{ cross_class|tojson }};
+  const RECORDS = {{ records|tojson }};
+
+  const rankSort = document.getElementById('rankSort');
+  const rankLesson = document.getElementById('rankLesson');
+  const rankStudentSort = document.getElementById('rankStudentSort');
+  const rankChart = document.getElementById('rankChart');
+  const rankStudentChart = document.getElementById('rankStudentChart');
+
+  function bandTag(b){
+    if (b === 'high') return '<span class="tag tag-green">高</span>';
+    if (b === 'mid')  return '<span class="tag" style="background:var(--warn)">中</span>';
+    return '<span class="tag" style="background:var(--danger)">低</span>';
+  }
+
+  // 通用横向条形图：metric ∈ {acc(0-100), trophy(计数)}；颜色始终按正确率等级（每个课节固定色）
+  function hbars(mount, items, metric, opts = {}){
+    if (!mount) return;
+    const L = opts.labelWidth || 100, R = opts.rightPad || 90;
+    const W = opts.width || 900, slot = opts.slot || 34, pad = opts.pad || 8;
+    const vals = items.map(it => metric === 'acc' ? it.avg * 100 : it.trophies);
+    const maxV = Math.max(...vals, 1);
+    const H = items.length * slot + pad * 2;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`;
+    items.forEach((it, i) => {
+      const y = pad + i * slot + slot / 2;
+      const v = metric === 'acc' ? it.avg * 100 : it.trophies;
+      const bw = Math.max(2, (v / maxV) * (W - L - R));
+      const c = pgColor(it.avg); // 颜色跟随“正确率等级”，不随排序切换而变
+      svg += `<text x="${L - 8}" y="${y + 4}" text-anchor="end" font-size="12" fill="#4b5563">${esc(it.short || it.fname)}</text>`;
+      svg += `<rect x="${L}" y="${y - 10}" width="${bw}" height="20" rx="4" fill="${c}" opacity="0.9"/>`;
+      // 数值 + 等级文字：状态色一定带文字标签，不单独靠颜色传达
+      const val = metric === 'acc' ? pct(it.avg) + '%' : it.trophies;
+      svg += `<text x="${L + bw + 8}" y="${y + 4}" font-size="11" fill="#6b7280">${val} · ${pgBand(it.avg)}</text>`;
+    });
+    svg += '</svg>';
+    mount.innerHTML = svg;
+  }
+
+  function esc(s){
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function renderRankChartAndTable(){
+    if (!rankSort) return;
+    const metric = rankSort.value;
+    const rows = (RK.lessons || []).slice();
+    rows.sort((a, b) => metric === 'acc' ? a.rank_acc - b.rank_acc : a.rank_trophy - b.rank_trophy);
+    hbars(rankChart, rows, metric);
+    const tb = document.getElementById('rankTableBody');
+    if (tb) tb.innerHTML = rows.map(l => `
+      <tr>
+        <td><strong>${l.rank_acc}</strong></td>
+        <td>${esc(l.fname)}</td>
+        <td class="${l.band === 'low' ? 'val-low' : ''}">${pct(l.avg)}%</td>
+        <td>${bandTag(l.band)}</td>
+        <td>${l.count}</td>
+        <td><strong>${l.trophies}</strong></td>
+        <td>${l.rank_trophy}</td>
+        <td>${l.attend}</td>
+      </tr>`).join('');
+  }
+
+  function renderRankStudents(){
+    if (!rankLesson || !rankStudentSort) return;
+    const key = rankLesson.value;
+    const at = key.indexOf('@');
+    const fname = key.slice(0, at);
+    const time = key.slice(at + 1);
+    const rows = RECORDS.filter(r => r.课节名称 === fname && r.开课时间 === time);
+    const metric = rankStudentSort.value;
+    rows.sort((a, b) => metric === 'acc' ? b.得分率 - a.得分率 : b.奖杯数 - a.奖杯数);
+    const items = rows.map(r => ({ short: r.学生姓名, fname: r.学生姓名, avg: r.得分率, trophies: r.奖杯数 }));
+    hbars(rankStudentChart, items, metric, { labelWidth: 88, slot: 32 });
+    const tb = document.getElementById('rankStudentTableBody');
+    if (tb) tb.innerHTML = rows.map((r, i) => {
+      const band = r.得分率 >= 0.8 ? 'high' : r.得分率 >= 0.5 ? 'mid' : 'low';
+      return `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${esc(r.学生姓名)}</td>
+        <td>${r.正确数}</td>
+        <td class="${band === 'low' ? 'val-low' : ''}">${pct(r.得分率)}%</td>
+        <td>${bandTag(band)}</td>
+        <td>${r.奖杯数}</td>
+        <td>${r.出勤总奖杯数}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderCrossTable(){
+    const tb = document.getElementById('crossTableBody');
+    if (!tb || !CC.lessons.length) return;
+    tb.innerHTML = CC.lessons.map(l => {
+      let best = '—', bestAvg = -1;
+      const cells = CC.classes.map(cl => {
+        const c = l.classes[String(cl.id)];
+        if (c) {
+          if (c.avg > bestAvg) { bestAvg = c.avg; best = cl.name; }
+          return `<td class="${c.band === 'low' ? 'val-low' : ''}">${pct(c.avg)}%<span class="muted small"> ×${c.count}</span></td>`;
+        }
+        return `<td class="muted">—</td>`;
+      }).join('');
+      return `<tr><td>${esc(l.fname)}</td>${cells}<td><span class="tag tag-green">${esc(best)}</span></td></tr>`;
+    }).join('');
+  }
+
+  // 子tab：只渲染当前可见的那一屏（隐藏的面板宽度为 0，SVG 会画空）
+  function activeRankSubtab(){
+    const p = document.querySelector('.subtab-panel.active');
+    return (p && p.id.replace('subtab-', '')) || 'lessons';
+  }
+  function renderActiveRank(){
+    const n = activeRankSubtab();
+    if (n === 'students') renderRankStudents();
+    else if (n === 'cross') renderCrossTable();
+    else renderRankChartAndTable();
+  }
+  function activateRankSubtab(name){
+    document.querySelectorAll('.subtab').forEach(b => b.classList.toggle('active', b.dataset.subtab === name));
+    document.querySelectorAll('.subtab-panel').forEach(p => p.classList.toggle('active', p.id === 'subtab-' + name));
+    try { sessionStorage.setItem('rankSubTab', name); } catch (e) {}
+    renderActiveRank();
+  }
+  window.renderCurrentRank = renderActiveRank;
+
+  if (rankSort) rankSort.addEventListener('change', renderRankChartAndTable);
+  if (rankStudentSort) rankStudentSort.addEventListener('change', renderRankStudents);
+
+  if (rankLesson && RK.lessons.length) {
+    // 用课节时间顺序填充下拉；选择即渲染该课的学生排行
+    rankLesson.innerHTML = RK.lessons.map(l =>
+      `<option value="${esc(l.key)}">${esc(l.short)} · ${(l.time || '').slice(5, 16)}（${pct(l.avg)}%）</option>`
+    ).join('');
+    rankLesson.addEventListener('change', renderRankStudents);
+  }
+
+  // 子tab 点击
+  document.querySelectorAll('.subtab').forEach(btn => {
+    btn.addEventListener('click', () => activateRankSubtab(btn.dataset.subtab));
+  });
+
+  // 初始化：恢复上次的子tab（默认「本班课节排行」），切到该标签页时由 activateTab 重渲染
+  const rankPanel = document.getElementById('tab-rank');
+  if (rankPanel) {
+    let sub = 'lessons';
+    try {
+      const saved = sessionStorage.getItem('rankSubTab');
+      if (saved && document.getElementById('subtab-' + saved)) sub = saved;
+    } catch (e) {}
+    activateRankSubtab(sub);
   }
 </script>
 {% endblock %}

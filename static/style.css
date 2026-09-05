@@ -276,3 +276,23 @@ input[type=password] {
 .val-low { color: var(--danger); font-weight: 600; }
 .delta-up { color: var(--green); font-weight: 600; }
 .delta-down { color: var(--danger); font-weight: 600; }
+
+/* ---------------- 课节排行 ---------------- */
+.rank-chart { width: 100%; max-width: 900px; margin: 14px auto 8px; }
+.rank-chart-sm { max-width: 820px; }
+.rank-student-switch { margin: 0 0 4px; }
+
+/* 课节排行内的二级子tab（比主tab更小，形成层级） */
+.subtabs {
+  display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+.subtab {
+  padding: 8px 16px; border: none; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; background: transparent; color: var(--muted);
+  border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; transition: all .15s;
+}
+.subtab:hover { color: var(--primary); background: #f0f5ff; }
+.subtab.active { color: var(--primary); font-weight: 600; border-bottom-color: var(--primary); }
+.subtab-panel { display: none; }
+.subtab-panel.active { display: block; }
