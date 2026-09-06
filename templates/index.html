@@ -96,7 +96,7 @@
           <thead>
             <tr>
               <th>排名</th><th>学生姓名</th><th>课节数</th>
-              <th>总正确数</th><th>平均得分率</th><th>总奖杯数</th><th>总出勤奖杯数</th><th>状态</th>
+              <th>总正确数</th><th>平均得分率</th><th>总奖杯数</th><th>总出勤奖杯数</th><th>补课</th><th>状态</th>
             </tr>
           </thead>
           <tbody>
@@ -109,6 +109,7 @@
               <td>{{ '%.1f' % (s['平均得分率']*100) }}%</td>
               <td><strong>{{ s['总奖杯数'] }}</strong></td>
               <td>{{ s['总出勤奖杯数'] }}</td>
+              <td>{% if s['补课节数'] %}<span class="tag tag-makeup">补课 {{ s['补课节数'] }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
               <td>{% if s['有记录'] %}<span class="tag tag-green">已上课</span>{% else %}<span class="tag tag-gray">未上课</span>{% endif %}</td>
             </tr>
             {% endfor %}
@@ -142,7 +143,7 @@
           <thead>
             <tr>
               <th>课节名称</th><th>开课时间</th><th>学生姓名</th>
-              <th>正确数</th><th>得分率</th><th>奖杯数</th><th>出勤总奖杯数</th>
+              <th>正确数</th><th>得分率</th><th>奖杯数</th><th>出勤总奖杯数</th><th>备注</th>
             </tr>
           </thead>
           <tbody>
@@ -155,6 +156,7 @@
               <td>{{ '%.0f' % (r['得分率']*100) }}%</td>
               <td>{{ r['奖杯数'] }}</td>
               <td>{{ r['出勤总奖杯数'] }}</td>
+              <td>{% if r.get('补课') %}<span class="tag tag-makeup">补课</span>{% else %}<span class="muted">—</span>{% endif %}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -255,6 +257,7 @@
       <button class="subtab" data-subtab="students">每课节学生</button>
       <button class="subtab" data-subtab="cross">各班对比</button>
     </nav>
+    <p class="muted small rank-note"><span class="tag tag-makeup">补课</span> 表示学生去了别的班时段补的课，仍计入其原班，评估时用它区分正常课堂与补课。</p>
 
     <!-- 子页 1：本班课节排行 -->
     <section class="subtab-panel active" id="subtab-lessons">
@@ -277,7 +280,7 @@
             <thead>
               <tr>
                 <th>正确率排名</th><th>课节</th><th>平均正确率</th><th>等级</th><th>人数</th>
-                <th>总奖杯数</th><th>奖杯排名</th><th>总出勤奖杯</th>
+                <th>总奖杯数</th><th>奖杯排名</th><th>总出勤奖杯</th><th>补课</th>
               </tr>
             </thead>
             <tbody id="rankTableBody"></tbody>
@@ -312,7 +315,7 @@
         <div class="table-scroll">
           <table class="data-table" id="rankStudentTable">
             <thead>
-              <tr><th>排名</th><th>学生姓名</th><th>正确数</th><th>得分率</th><th>等级</th><th>奖杯数</th><th>出勤总奖杯</th></tr>
+              <tr><th>排名</th><th>学生姓名</th><th>正确数</th><th>得分率</th><th>等级</th><th>奖杯数</th><th>出勤总奖杯</th><th>备注</th></tr>
             </thead>
             <tbody id="rankStudentTableBody"></tbody>
           </table>
@@ -810,16 +813,14 @@
         <td><strong>${l.trophies}</strong></td>
         <td>${l.rank_trophy}</td>
         <td>${l.attend}</td>
+        <td>${l.makeup ? `<span class="tag tag-makeup">补课 ${l.makeup}</span>` : '<span class="muted">—</span>'}</td>
       </tr>`).join('');
   }
 
   function renderRankStudents(){
     if (!rankLesson || !rankStudentSort) return;
-    const key = rankLesson.value;
-    const at = key.indexOf('@');
-    const fname = key.slice(0, at);
-    const time = key.slice(at + 1);
-    const rows = RECORDS.filter(r => r.课节名称 === fname && r.开课时间 === time);
+    const fname = rankLesson.value;   // 可选值即课程短名（P1/先导课），同一课程只出现一次
+    const rows = RECORDS.filter(r => shortLesson(r.课节名称) === fname);
     const metric = rankStudentSort.value;
     rows.sort((a, b) => metric === 'acc' ? b.得分率 - a.得分率 : b.奖杯数 - a.奖杯数);
     const items = rows.map(r => ({ short: r.学生姓名, fname: r.学生姓名, avg: r.得分率, trophies: r.奖杯数 }));
@@ -836,6 +837,7 @@
         <td>${bandTag(band)}</td>
         <td>${r.奖杯数}</td>
         <td>${r.出勤总奖杯数}</td>
+        <td>${r.补课 ? '<span class="tag tag-makeup">补课</span>' : '<span class="muted">—</span>'}</td>
       </tr>`;
     }).join('');
   }
@@ -880,9 +882,9 @@
   if (rankStudentSort) rankStudentSort.addEventListener('change', renderRankStudents);
 
   if (rankLesson && RK.lessons.length) {
-    // 用课节时间顺序填充下拉；选择即渲染该课的学生排行
+    // 每个课程只填一项（按最早上课的时间顺序）；选择即渲染该课程的学生排行（含补课生）
     rankLesson.innerHTML = RK.lessons.map(l =>
-      `<option value="${esc(l.key)}">${esc(l.short)} · ${(l.time || '').slice(5, 16)}（${pct(l.avg)}%）</option>`
+      `<option value="${esc(l.key)}">${esc(l.short)} · ${(l.time || '').slice(5, 16)}（${pct(l.avg)}% · ${l.count}人${l.makeup ? ' · 含补课' : ''}）</option>`
     ).join('');
     rankLesson.addEventListener('change', renderRankStudents);
   }

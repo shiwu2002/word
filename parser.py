@@ -309,6 +309,7 @@ def aggregate_for_class(records, roster):
                 "平均得分率": (sum(r["得分率"] for r in rows) / n) if n else 0,
                 "总奖杯数": sum(r["奖杯数"] for r in rows),
                 "总出勤奖杯数": sum(r["出勤总奖杯数"] for r in rows),
+                "补课节数": sum(1 for r in rows if r.get("补课")),  # 去别班时段补课的次数
                 "有记录": n > 0,
             }
         )
@@ -436,36 +437,40 @@ def band_of(avg):
 def rankings_for_class(records):
     """计算「某班级各课节」的正确率排名与奖杯排名。
 
-    以 (课节名称, 开课时间) 为一个课节会话，统计该会话内全班学生：
-    平均正确率、人数、总奖杯数、总出勤奖杯数与等级（high/mid/low），
-    并分别按「平均正确率」「总奖杯数」降序给出排名。
+    以「课节的短名」为一个课程（如 P1、P2、先导课）。把该班学生在这门课的
+    所有课时记录（含去别的班时段补课、以及被并入本班但标注为补课的记录）
+    合并统计——这样同一门课不会因开课时间不同、或先导课文件后缀不同
+    而出现两条重复项。
 
     返回: {lessons: [{fname, time, key, avg, count, trophies, attend, band,
-                      rank_acc, rank_trophy, short}]}
-    key 是唯一标识（fname + '@' + time）；short 是便于展示的短课节名。
+                      rank_acc, rank_trophy, short, makeup}]}
+    fname/short/key 都是短名（课程标识，唯一）；time 取该课程在本班最早的
+    开课时间（作展示与排序）；makeup 是这门课里属于补课的记录数。
     """
-    by_sess = defaultdict(list)
+    by_course = defaultdict(list)
     for r in records:
-        by_sess[(r["课节名称"], r["开课时间"])].append(r)
+        by_course[_short_lesson(r["课节名称"])].append(r)
 
     lessons = []
-    for (fname, time), rows in by_sess.items():
+    for fname, rows in by_course.items():
         avg = round(_mean([x["得分率"] for x in rows]), 4)
+        times = [x["开课时间"] for x in rows if x["开课时间"]]
         lessons.append(
             {
-                "fname": fname,          # 完整课节名（如「P1」「先导课 U260724」）
-                "time": time,
-                "key": f"{fname}@{time}",# 唯一标识，前端用来定位该课节
+                "fname": fname,          # 课程标识（P1/P2/先导课）
+                "time": min(times) if times else "",  # 该课程最早一次时间，作展示/排序
+                "key": fname,            # 唯一标识：直接用课程短名
                 "avg": avg,
-                "count": len(rows),
+                "count": len(rows),      # 该班在本课程记录数（含补课）
                 "trophies": sum(x["奖杯数"] for x in rows),
                 "attend": sum(x["出勤总奖杯数"] for x in rows),
                 "band": band_of(avg),
-                "short": _short_lesson(fname),
+                "short": fname,
+                "makeup": sum(1 for x in rows if x.get("补课")),  # 其中补课记录数
             }
         )
 
-    # 先按开课时间排成日程顺序，再据此分配正确率/奖杯排名（排名不依赖时间顺序）
+    # 先按最早上课时间排成日程顺序，再据此分配正确率/奖杯排名
     lessons.sort(key=lambda l: l["time"])
     for rank, i in enumerate(sorted(range(len(lessons)), key=lambda i: lessons[i]["avg"], reverse=True), 1):
         lessons[i]["rank_acc"] = rank
@@ -488,17 +493,18 @@ def cross_class_rankings(class_records):
     """计算「同一课节跨班级」的正确率/奖杯对比。
 
     class_records: [{class_id, class_name, records, ...}]（一般不含「默认名单」）。
-    以课节名（如 P1）为单位，统计每个班在该课节的均分/人数/奖杯。
+    以「课节短名」（如 P1、先导课）为单位，统计每个班在该课节的均分/人数/奖杯。
+    用短名做身份，避免同一门先导课因文件后缀不同被拆成多行。
 
     返回: {lessons: [{fname, time, classes: {class_id: {avg,count,trophies,attend,band}}}],
            classes: [{id, name}]}
     """
-    by_lesson = {}    # {课节名: {fname, time, classes: {cid: {...}}}}
+    by_lesson = {}    # {课节短名: {fname, time, classes: {cid: {...}}}}
     class_meta = []
     for cr in class_records:
         class_meta.append({"id": cr["class_id"], "name": cr["class_name"]})
         for r in cr["records"]:
-            fname = r["课节名称"]
+            fname = _short_lesson(r["课节名称"])
             time = r["开课时间"]
             if fname not in by_lesson:
                 by_lesson[fname] = {"fname": fname, "time": "", "classes": {}}
@@ -529,6 +535,38 @@ def cross_class_rankings(class_records):
     return {"lessons": lessons, "classes": class_meta}
 
 
+# ---------------- 补课识别 ----------------
+
+def session_owners(class_records):
+    """判定每个 (课节名称, 开课时间) 由哪个班级「拥有」。
+
+    各班级课程内容相同、仅上课时间不同；学生可能为补课去别的班时段上课。
+    这里以「哪个班在当前时段记录数最多」（多数派）作为该时段的归属班。
+    补课生的记录落在该时段，但因是少数派而不会成为归属班，故可据此标记补课。
+
+    class_records: [{class_id, class_name, records}, ...]（一般不含「默认名单」）。
+    返回 {(课节名称, 开课时间): 归属班级 class_id}。
+    """
+    counts = defaultdict(lambda: defaultdict(int))  # (课节,时间) -> {class_id: 条数}
+    for cr in class_records:
+        for r in cr["records"]:
+            counts[(r["课节名称"], r["开课时间"])][cr["class_id"]] += 1
+    # 每个时段取记录数最多的班作为归属班
+    return {key: max(v, key=lambda c: v[c]) for key, v in counts.items()}
+
+
+def annotate_makeup(records, owners, cid):
+    """给每条记录补一个「补课」布尔标记。
+
+    该记录的课节归属班 != 本班 cid，说明这名本班学生去了别班的时段补课，
+    记为补课；否则（归属班就是本班）为正常上课。无需回写数据库，运行时标注即可。
+    """
+    for r in records:
+        owner = owners.get((r["课节名称"], r["开课时间"]))
+        r["补课"] = bool(owner and owner != cid)
+    return records
+
+
 # ---------------- 导出 ----------------
 
 def export_excel(records, summary):
@@ -543,13 +581,17 @@ def export_excel(records, summary):
     with pd.ExcelWriter(out, engine="openpyxl") as writer:  # with 结束自动保存关闭
         df_sum = pd.DataFrame(
             summary,
-            columns=["学生姓名", "课节数", "总正确数", "平均得分率", "总奖杯数", "总出勤奖杯数"],
+            columns=["学生姓名", "课节数", "总正确数", "平均得分率", "总奖杯数", "总出勤奖杯数", "补课节数"],
         )
         df_sum["平均得分率"] = df_sum["平均得分率"].map(lambda x: f"{x * 100:.1f}%")
         df_sum.to_excel(writer, sheet_name="学生汇总", index=False)
 
-        df_det = pd.DataFrame(records, columns=EXPECTED_COLS)
+        # 明细：补课列可选（无标注时不出现），补课显示「是/否」
+        det_cols = EXPECTED_COLS + (["补课"] if any("补课" in r for r in records) else [])
+        df_det = pd.DataFrame(records, columns=det_cols)
         df_det["得分率"] = df_det["得分率"].map(lambda x: f"{x * 100:.0f}%")
+        if "补课" in det_cols:
+            df_det["补课"] = df_det["补课"].map(lambda x: "是" if x else "否")
         df_det.to_excel(writer, sheet_name="明细记录", index=False)
     out.seek(0)  # 指针回到开头，否则 send_file 读到的是空
     return out

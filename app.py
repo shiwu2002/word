@@ -30,7 +30,7 @@ from datastore import (
 from parser import (
     parse_upload, parse_roster, aggregate_for_class,
     export_excel, progress_for_class, rankings_for_class,
-    cross_class_rankings, EXPECTED_COLS,
+    cross_class_rankings, session_owners, annotate_makeup, EXPECTED_COLS,
 )
 from integration import route_merge_lessons
 from config import SUMMARY_FIELDS
@@ -83,19 +83,7 @@ def index():
     evaluations, history_evaluations = [], []
     progress, selected_student = {"rows": [], "class_sessions": []}, ""
     rankings = {"lessons": []}
-    if current_class:
-        roster = get_roster(cid)                  # 该班级学生名单（固定框架）
-        records, version_info = get_current_records(cid)
-        versions = list_versions(cid)
-        summary = aggregate_for_class(records, roster)  # 以名单为框架汇总
-        progress = progress_for_class(records, roster)   # 进步曲线数据
-        rankings = rankings_for_class(records)           # 本班各课节正确率/奖杯排行
-        selected_student = request.args.get("student", "").strip()
-        evaluations = get_evaluations(cid)              # 最新一批评价
-        history_evaluations = get_history_evaluations(cid)  # 全部历史评价（按批次）
-
-    # 跨班级对比：取所有正式班（排除「默认名单」）的当前记录，按课节名对比正确率/奖杯
-    cross_class = {"lessons": [], "classes": []}
+    # 先取所有正式班（排除「默认名单」）的当前记录：既用于跨班对比，也用于判定补课归属
     class_records = []
     for c in list_classes():
         if c["name"] == "默认名单":
@@ -103,8 +91,24 @@ def index():
         recs, _ = get_current_records(c["id"])
         if recs:
             class_records.append({"class_id": c["id"], "class_name": c["name"], "records": recs})
-    if class_records:
-        cross_class = cross_class_rankings(class_records)
+    owners = session_owners(class_records) if class_records else {}
+    cross_class = (
+        cross_class_rankings(class_records) if class_records else {"lessons": [], "classes": []}
+    )
+
+    if current_class:
+        roster = get_roster(cid)                  # 该班级学生名单（固定框架）
+        records, version_info = get_current_records(cid)
+        versions = list_versions(cid)
+        # 补课标注：本班学生若上了别班时段的课（该时段归属班≠本班）记「补课」。「默认名单」不标
+        if current_class["name"] != "默认名单":
+            annotate_makeup(records, owners, cid)
+        summary = aggregate_for_class(records, roster)  # 以名单为框架汇总
+        progress = progress_for_class(records, roster)   # 进步曲线数据
+        rankings = rankings_for_class(records)           # 本班各课节正确率/奖杯排行
+        selected_student = request.args.get("student", "").strip()
+        evaluations = get_evaluations(cid)              # 最新一批评价
+        history_evaluations = get_history_evaluations(cid)  # 全部历史评价（按批次）
 
     return render_template(
         "index.html",
