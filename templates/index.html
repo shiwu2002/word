@@ -67,6 +67,17 @@
 
     <div class="card">
       <div class="card-head">
+        <h2>导入课堂成就明细（逐题）</h2>
+      </div>
+      <p class="muted">上传含「逐题明细 / 错题清单」工作表的课堂成就明细 Excel。系统保存每位学生在每道<strong>课堂小测 / 课后作业</strong>题的对错，用于学生评价与错题讲评。同一课节重复导入会覆盖旧数据（已配置的讲评模板保留）。导入后到「学生评价」标签为每道题配置<strong>错题讲评模板</strong>。</p>
+      <form method="post" action="{{ url_for('achievement_import') }}" enctype="multipart/form-data" class="upload-form">
+        <input type="file" name="file" accept=".xlsx,.xls" required>
+        <button class="btn btn-primary" type="submit">导入逐题明细</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>班级管理
           <span class="muted small">创建于 {{ current_class.created_at }}</span>
         </h2>
@@ -429,6 +440,43 @@
         <p class="empty">暂无评价，选择字段后点击「生成评价」。</p>
       {% endif %}
     </div>
+
+    {% if achievement_questions %}
+    <div class="card">
+      <div class="card-head">
+        <h2>错题讲评模板
+          <span class="muted small">为每道课测题配置答错时的讲评要点，生成评价时 AI 会把答错学生该题的模板一并纳入总结</span>
+        </h2>
+      </div>
+      {% for lesson in achievement_questions %}
+      <div class="qtpl-lesson">
+        <h3 class="qtpl-lesson-title">{{ lesson.lesson_name }}
+          <span class="muted small">{{ lesson.lesson_time[:10] }}</span>
+        </h3>
+        {% for q in lesson.questions %}
+        <div class="qtpl" data-lesson="{{ lesson.lesson_name }}" data-qkey="{{ q.question_key }}">
+          <div class="qtpl-head">
+            <span class="tag {% if '课后' in q.question_key %}tag-makeup{% else %}tag-green{% endif %}">{{ q.question_key }}</span>
+            <span class="qtpl-stem" title="{{ q.stem }}">{{ q.stem }}</span>
+            <span class="muted small">正确答案 <strong>{{ q.correct_option or '—' }}</strong>{% if q.knowledge_point %} · {{ q.knowledge_point }}{% endif %}</span>
+          </div>
+          <div class="qtpl-meta">
+            {% if q.wrong_students %}
+            <span class="muted small">答错 {{ q.wrong_students|length }} 人：</span>
+            {% for w in q.wrong_students %}<span class="chip chip-wrong">{{ w.name }}{% if w.choice %}（选{{ w.choice }}）{% endif %}</span>{% endfor %}
+            {% else %}<span class="muted small">全员答对</span>{% endif %}
+          </div>
+          <div class="qtpl-edit">
+            <textarea class="qtpl-text" rows="2" placeholder="答错该题时的讲评模板（留空则评价中仅简要提及）：如「本题考查递推关系式的建立，选错说明没有倒推验证，讲解时应从第 n 天与第 n+1 天的数量关系入手…」">{{ q.reply_template }}</textarea>
+            <button type="button" class="btn btn-small qtpl-save">保存模板</button>
+            <span class="qtpl-status muted small"></span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
   </section>
 
   <!-- ========== Tab 6：版本历史 ========== -->
@@ -981,5 +1029,31 @@
     });
     lessonClear.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); lessonInput.value = ''; renderLessonUi(); });
   }
+
+  // ---- 错题讲评模板保存（评价页） ----
+  document.querySelectorAll('.qtpl-save').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const box = btn.closest('.qtpl');
+      const status = box.querySelector('.qtpl-status');
+      btn.disabled = true;
+      fetch('{{ url_for("achievement_template_save") }}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          lesson_name: box.dataset.lesson,
+          question_key: box.dataset.qkey,
+          reply_template: box.querySelector('.qtpl-text').value
+        })
+      })
+        .then(r => r.json())
+        .then(d => {
+          status.textContent = d.ok
+            ? '已保存 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false })
+            : '保存失败：' + (d.error || '未知错误');
+        })
+        .catch(() => { status.textContent = '保存失败（网络异常）'; })
+        .finally(() => { btn.disabled = false; });
+    });
+  });
 </script>
 {% endblock %}

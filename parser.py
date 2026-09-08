@@ -249,6 +249,140 @@ def parse_upload(filename, filebytes):
     return records
 
 
+# ---------------- 课堂成就明细（逐题）解析 ----------------
+
+# 逐题明细的基础列（题目列 = 除这些之外的全部列，如 课堂小测1、课后作业1）
+ACHIEVEMENT_BASE_COLS = set(EXPECTED_COLS) | {"班级"}
+
+# 对错取值归一化：不同导出端的写法映射到「对 / 错」
+RIGHT_MARKS = {"对", "正确", "√", "✓", "right", "true", "yes", "y"}
+WRONG_MARKS = {"错", "错误", "×", "x", "wrong", "false", "no", "n"}
+
+
+def _norm_result(val):
+    """把逐题明细里的对错写法统一成「对 / 错」，无法识别返回空串。"""
+    s = str(val).strip().lower()
+    if not s or s in ("nan", "none", "-"):
+        return ""
+    if s in RIGHT_MARKS:
+        return "对"
+    if s in WRONG_MARKS:
+        return "错"
+    return ""
+
+
+def _clean_text(val):
+    """单元格文本清洗：去空白，空值/NaN 返回空串。"""
+    s = str(val).strip() if val is not None else ""
+    return "" if s.lower() in ("nan", "none", "nat") else s
+
+
+def parse_wrong_students(text):
+    """把「错题学生明细」解析成 [{name, choice}]。
+
+    形如 "顾龚昊(选B); 金浩祺(选A)"（分号中英文皆可、括号全半角皆可）。
+    没有选择信息的裸姓名也能解析（choice 为空串）。
+    """
+    students = []
+    for part in re.split(r"[;；\n]", str(text or "")):
+        part = part.strip()
+        if not part or part.lower() == "nan":
+            continue
+        m = re.match(r"([^（(]+?)[（(]\s*选?\s*([A-Za-z])\s*[)）]", part)
+        if m:
+            students.append({"name": m.group(1).strip(), "choice": m.group(2).upper()})
+        else:
+            students.append({"name": part, "choice": ""})
+    return students
+
+
+def parse_achievement(filebytes):
+    """解析课堂成就明细 Excel（含「逐题明细」「错题清单」两个工作表）。
+
+    逐题明细：每个学生一行，基础列（课节名称/开课时间/学生姓名/正确数/得分率/
+              奖杯数/出勤总奖杯数/班级）+ 动态题目列（列名即题号，值为 对/错）。
+    错题清单：每题一行（题目/类型/题干/选项/正确选项/知识点/错题学生明细）。
+
+    返回:
+      {
+        "lesson_name": 课节名称, "lesson_time": 开课时间, "source_class": 班级,
+        "students": [{学生姓名, 正确数, 得分率, 奖杯数, 出勤总奖杯数, results: {题号: 对/错}}],
+        "questions": [{question_key, qtype, stem, options, correct_option,
+                       knowledge_point, wrong_students: [{name, choice}]}],
+      }
+    一个文件只允许包含一个课节（真实导出即如此），多个课节抛 ValueError。
+    """
+    sheets = pd.read_excel(io.BytesIO(filebytes), sheet_name=None)
+    detail = wrong = None
+    for df in sheets.values():
+        cols = {str(c).strip() for c in df.columns}
+        if {"课节名称", "学生姓名"} <= cols:
+            detail = df
+        elif {"题干", "题目"} <= cols:
+            wrong = df
+    if detail is None:
+        raise ValueError("未找到「逐题明细」工作表（需含 课节名称 / 学生姓名 列）")
+
+    detail, _ = normalize_columns(detail)
+    df = detail[detail["学生姓名"].notna() & (detail["学生姓名"].astype(str).str.strip() != "")]
+    if df.empty:
+        raise ValueError("逐题明细中没有学生数据")
+
+    lesson_name = str(df.iloc[0]["课节名称"]).strip()
+    lesson_time = normalize_time(df.iloc[0]["开课时间"])
+    lessons = {str(v).strip() for v in df["课节名称"].dropna()}
+    if len(lessons) > 1:
+        raise ValueError("该文件包含多个课节，请按课节逐个文件导入：" + "、".join(sorted(lessons)))
+
+    # 题目列 = 基础列之外的动态列（课堂小测N / 课后作业N ...）
+    q_cols = [c for c in df.columns if str(c).strip() not in ACHIEVEMENT_BASE_COLS]
+
+    students = []
+    for _, row in df.iterrows():
+        results = {}
+        for c in q_cols:
+            r = _norm_result(row[c])
+            if r:
+                results[str(c).strip()] = r
+        students.append(
+            {
+                "学生姓名": str(row["学生姓名"]).strip(),
+                "正确数": int(safe_num(row["正确数"])),
+                "得分率": parse_accuracy(row["得分率"]),
+                "奖杯数": int(safe_num(row["奖杯数"])),
+                "出勤总奖杯数": int(safe_num(row.get("出勤总奖杯数", 0))),
+                "results": results,
+            }
+        )
+
+    source_class = ""
+    if "班级" in df.columns:
+        vals = [str(v).strip() for v in df["班级"].dropna() if str(v).strip()]
+        source_class = vals[0] if vals else ""
+
+    questions = []
+    if wrong is not None:
+        for _, row in wrong.iterrows():
+            questions.append(
+                {
+                    "question_key": _clean_text(row["题目"]),
+                    "qtype": _clean_text(row.get("类型", "")),
+                    "stem": _clean_text(row.get("题干", "")),
+                    "options": _clean_text(row.get("选项", "")),
+                    "correct_option": _clean_text(row.get("正确选项", "")),
+                    "knowledge_point": _clean_text(row.get("知识点", "")),
+                    "wrong_students": parse_wrong_students(row.get("错题学生明细", "")),
+                }
+            )
+    return {
+        "lesson_name": lesson_name,
+        "lesson_time": lesson_time,
+        "source_class": source_class,
+        "students": students,
+        "questions": questions,
+    }
+
+
 # ---------------- 合并 ----------------
 
 def merge_records(existing, new_rows):

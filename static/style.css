@@ -181,6 +181,30 @@ input[type=file] { font-size: 13px; }
   background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
   padding: 5px 12px; border-radius: 14px; font-size: 13px;
 }
+.chip-wrong { background: #fef2f2; color: #b91c1c; border-color: #fecaca; padding: 2px 10px; font-size: 12px; }
+
+/* 错题讲评模板（评价页） */
+.qtpl-lesson { margin-bottom: 18px; }
+.qtpl-lesson-title { font-size: 14px; margin: 0 0 10px; color: var(--text); }
+.qtpl {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 10px; background: #fafafa;
+}
+.qtpl-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.qtpl-stem {
+  flex: 1; min-width: 200px; font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qtpl-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+.qtpl-edit { display: flex; align-items: flex-start; gap: 8px; }
+.qtpl-text {
+  flex: 1; resize: vertical; font-size: 13px; line-height: 1.5;
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  font-family: inherit;
+}
+.qtpl-text:focus { outline: none; border-color: var(--primary, #4f46e5); }
+.qtpl-save { flex-shrink: 0; margin-top: 2px; }
+.qtpl-status { align-self: center; white-space: nowrap; }
 .row-muted { color: var(--muted); }
 .row-muted td { opacity: .65; }
 

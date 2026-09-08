@@ -85,6 +85,34 @@ def init_db():
             created_at  TEXT NOT NULL,
             FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS achievement_results (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            lesson_name   TEXT NOT NULL,
+            lesson_time   TEXT NOT NULL,
+            student_name  TEXT NOT NULL,
+            question_key  TEXT NOT NULL,
+            result        TEXT NOT NULL,          -- 对 / 错
+            correct_count INTEGER,
+            score_rate    REAL,
+            trophies      INTEGER,
+            source_class  TEXT,
+            created_at    TEXT NOT NULL,
+            UNIQUE (lesson_name, student_name, question_key)
+        );
+        CREATE TABLE IF NOT EXISTS question_templates (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            lesson_name    TEXT NOT NULL,
+            question_key   TEXT NOT NULL,
+            qtype          TEXT,
+            question_text  TEXT,
+            options        TEXT,
+            correct_option TEXT,
+            knowledge_point TEXT,
+            wrong_students TEXT,                  -- JSON [{name, choice}]
+            reply_template TEXT DEFAULT '',
+            updated_at     TEXT NOT NULL,
+            UNIQUE (lesson_name, question_key)
+        );
         """
     )
     # 兼容已有数据库：若 evaluations 表缺少 batch_id 列则添加（已存在则忽略）
@@ -477,3 +505,167 @@ def get_history_evaluations(cid):
             {"student_name": r["student_name"], "evaluation": r["evaluation"]}
         )
     return batches
+
+
+# ---------------- 课堂成就明细（逐题）与错题讲评模板 ----------------
+
+def save_achievement(data):
+    """保存一次课堂成就明细导入（整体替换该课节数据）。
+
+    - achievement_results：按课节删除旧记录后整批插入（重复导入 = 覆盖）。
+    - question_templates：upsert 题目元数据，但保留已配置的 reply_template 不覆盖。
+    返回 (学生数, 题目数)。
+    """
+    now = _now()
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM achievement_results WHERE lesson_name=?", (data["lesson_name"],))
+        for st in data["students"]:
+            for qkey, result in st["results"].items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO achievement_results
+                       (lesson_name, lesson_time, student_name, question_key, result,
+                        correct_count, score_rate, trophies, source_class, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        data["lesson_name"], data["lesson_time"], st["学生姓名"], qkey, result,
+                        st["正确数"], st["得分率"], st["奖杯数"], data.get("source_class", ""), now,
+                    ),
+                )
+        for q in data["questions"]:
+            conn.execute(
+                """INSERT INTO question_templates
+                   (lesson_name, question_key, qtype, question_text, options,
+                    correct_option, knowledge_point, wrong_students, reply_template, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '',
+                           ?)
+                   ON CONFLICT(lesson_name, question_key) DO UPDATE SET
+                     qtype=excluded.qtype,
+                     question_text=excluded.question_text,
+                     options=excluded.options,
+                     correct_option=excluded.correct_option,
+                     knowledge_point=excluded.knowledge_point,
+                     wrong_students=excluded.wrong_students,
+                     updated_at=excluded.updated_at""",
+                (
+                    data["lesson_name"], q["question_key"], q["qtype"], q["stem"], q["options"],
+                    q["correct_option"], q["knowledge_point"],
+                    json.dumps(q["wrong_students"], ensure_ascii=False), now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return len(data["students"]), len(data["questions"])
+
+
+def list_achievement_lessons():
+    """已导入的课节列表：[{lesson_name, lesson_time, student_count, question_count}]。"""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT lesson_name, MAX(lesson_time) AS lesson_time,
+                  COUNT(DISTINCT student_name) AS student_count,
+                  COUNT(DISTINCT question_key) AS question_count
+           FROM achievement_results GROUP BY lesson_name ORDER BY lesson_time DESC"""
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_achievement_questions():
+    """全部课节的题目与讲评模板（评价页编辑用），按课节时间倒序分组。
+
+    返回 [{lesson_name, lesson_time, questions: [...]}]，question 含
+    reply_template 与 wrong_students（已解析成 [{name, choice}]）。
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT t.*, t.question_text AS stem, MAX(a.lesson_time) AS lesson_time
+           FROM question_templates t
+           LEFT JOIN achievement_results a
+             ON a.lesson_name = t.lesson_name AND a.question_key = t.question_key
+           GROUP BY t.id
+           ORDER BY lesson_time DESC, t.question_key"""
+    ).fetchall()
+    conn.close()
+    lessons, lesson_map = [], {}
+    for r in rows:
+        q = dict(r)
+        q["wrong_students"] = json.loads(q["wrong_students"] or "[]")
+        lesson = lesson_map.get(q["lesson_name"])
+        if not lesson:
+            lesson = {"lesson_name": q["lesson_name"], "lesson_time": q["lesson_time"], "questions": []}
+            lesson_map[q["lesson_name"]] = lesson
+            lessons.append(lesson)
+        lesson["questions"].append(q)
+    return lessons
+
+
+def save_question_template(lesson_name, question_key, template):
+    """保存某课节某题的错题讲评模板（不存在该题记录则忽略）。"""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE question_templates SET reply_template=?, updated_at=? "
+        "WHERE lesson_name=? AND question_key=?",
+        (template, _now(), lesson_name, question_key),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_achievement_for_students(names):
+    """查询一组学生最新一次课测的逐题情况（评价生成用）。
+
+    返回 {学生姓名: {lesson_name, lesson_time, score_rate, correct_count,
+                     wrongs: [{question_key, stem, correct_option, knowledge_point,
+                               choice, reply_template}]}}
+    只取该生最近课节（按 lesson_time）；wrongs 只含答错题，choice 来自错题清单
+    中该生的选择（无记录为空串），reply_template 为用户配置的讲评模板（可为空）。
+    """
+    if not names:
+        return {}
+    conn = get_conn()
+    marks = ",".join("?" for _ in names)
+    rows = conn.execute(
+        f"""SELECT a.student_name, a.lesson_name, a.lesson_time, a.result,
+                   a.score_rate, a.correct_count, a.question_key,
+                   t.question_text AS stem, t.correct_option, t.knowledge_point,
+                   t.wrong_students, t.reply_template
+            FROM achievement_results a
+            LEFT JOIN question_templates t
+              ON t.lesson_name = a.lesson_name AND t.question_key = a.question_key
+            WHERE a.student_name IN ({marks})
+            ORDER BY a.lesson_time DESC, a.question_key""",
+        tuple(names),
+    ).fetchall()
+    conn.close()
+
+    result = {}
+    for r in rows:
+        st = result.setdefault(
+            r["student_name"],
+            {"lesson_name": r["lesson_name"], "lesson_time": r["lesson_time"],
+             "score_rate": r["score_rate"] or 0, "correct_count": r["correct_count"] or 0,
+             "wrongs": []},
+        )
+        # 行已按 lesson_time 倒序：首次见到该学生即其最近课节，其后不同课节的行直接跳过
+        if r["lesson_name"] != st["lesson_name"]:
+            continue
+        if r["result"] != "错":
+            continue
+        choice = ""
+        for w in json.loads(r["wrong_students"] or "[]"):
+            if w.get("name") == r["student_name"]:
+                choice = w.get("choice", "")
+                break
+        st["wrongs"].append(
+            {
+                "question_key": r["question_key"],
+                "stem": r["stem"] or "",
+                "correct_option": r["correct_option"] or "",
+                "knowledge_point": r["knowledge_point"] or "",
+                "choice": choice,
+                "reply_template": r["reply_template"] or "",
+            }
+        )
+    return result

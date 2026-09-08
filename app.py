@@ -26,11 +26,14 @@ from datastore import (
     get_setting, set_setting, get_api_key, get_model_name,
     save_evaluations, get_evaluations,
     get_previous_evals_by_student, get_history_evaluations,
+    save_achievement, get_achievement_questions, save_question_template,
+    get_achievement_for_students,
 )
 from parser import (
     parse_upload, parse_roster, aggregate_for_class,
     export_excel, progress_for_class, rankings_for_class,
     cross_class_rankings, session_owners, annotate_makeup, EXPECTED_COLS,
+    parse_achievement,
 )
 from integration import route_merge_lessons
 from config import SUMMARY_FIELDS
@@ -81,6 +84,7 @@ def index():
     current_class = get_class(cid) if cid else None
     records, version_info, versions, summary, roster = [], None, [], [], []
     evaluations, history_evaluations = [], []
+    achievement_questions = []
     progress, selected_student = {"rows": [], "class_sessions": []}, ""
     rankings = {"lessons": []}
     # 先取所有正式班（排除「默认名单」）的当前记录：既用于跨班对比，也用于判定补课归属
@@ -109,6 +113,7 @@ def index():
         selected_student = request.args.get("student", "").strip()
         evaluations = get_evaluations(cid)              # 最新一批评价
         history_evaluations = get_history_evaluations(cid)  # 全部历史评价（按批次）
+        achievement_questions = get_achievement_questions()  # 课测题目与讲评模板
 
     return render_template(
         "index.html",
@@ -125,6 +130,7 @@ def index():
         cross_class=cross_class,
         evaluations=evaluations,
         history_evaluations=history_evaluations,
+        achievement_questions=achievement_questions,
         summary_fields=SUMMARY_FIELDS,
         api_key_configured=bool(get_api_key()),
     )
@@ -227,6 +233,43 @@ def lessons_upload():
     if not affected and not errors:
         flash("没有可解析的课时数据", "error")
     return redirect(url_for("index"))
+
+
+# ---------------- 课堂成就明细（逐题）导入与讲评模板 ----------------
+
+@app.route("/achievement/import", methods=["POST"])
+def achievement_import():
+    """导入课堂成就明细 Excel（逐题明细 + 错题清单），保存逐题对错与题目元数据。"""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        flash("请选择课堂成就明细文件", "error")
+        return redirect(url_for("index"))
+    try:
+        data = parse_achievement(f.read())
+    except ValueError as e:
+        flash(f"成就明细解析失败：{e}", "error")
+        return redirect(url_for("index"))
+    n_students, n_questions = save_achievement(data)
+    wrong_total = sum(len(q["wrong_students"]) for q in data["questions"])
+    flash(
+        f"已导入课堂成就明细：{data['lesson_name']}（{data['lesson_time'][:10]}）— "
+        f"{n_students} 名学生、{n_questions} 道题、{wrong_total} 人次答错。"
+        "可到「学生评价」标签为每道题配置讲评模板。",
+        "success",
+    )
+    return redirect(url_for("index"))
+
+
+@app.route("/achievement/template", methods=["POST"])
+def achievement_template_save():
+    """保存某课节某题的错题讲评模板（评价页 AJAX 调用）。"""
+    lesson = request.form.get("lesson_name", "").strip()
+    qkey = request.form.get("question_key", "").strip()
+    template = request.form.get("reply_template", "").strip()
+    if not lesson or not qkey:
+        return {"ok": False, "error": "参数缺失"}, 400
+    save_question_template(lesson, qkey, template)
+    return {"ok": True}
 
 
 # ---------------- 班级管理 ----------------
@@ -364,12 +407,17 @@ def classes_evaluate(cid):
     # 获取历史评价，供 LLM 综合参考
     previous_evals = get_previous_evals_by_student(cid)
     custom_style = request.form.get("custom_style", "").strip()
-    evaluations, error = generate_evaluations(summary, fields, api_key, previous_evals, custom_style)
+    # 课测逐题数据（答错题目 + 用户配置的讲评模板），按班级名单学生过滤
+    achievement = get_achievement_for_students([s["学生姓名"] for s in summary])
+    evaluations, error = generate_evaluations(
+        summary, fields, api_key, previous_evals, custom_style, achievement
+    )
     if error:
         flash(f"评价生成失败：{error}", "error")
         return redirect(url_for("index", class_id=cid))
 
-    save_evaluations(cid, evaluations, fields)
+    fields_used = fields + (["错题讲评模板"] if achievement else [])
+    save_evaluations(cid, evaluations, fields_used)
     flash(f"已为 {len(evaluations)} 名学生生成评价（依据：{'、'.join(fields)}）", "success")
     return redirect(url_for("index", class_id=cid))
 

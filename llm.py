@@ -32,15 +32,47 @@ def _format_value(field, val):
     return str(val)
 
 
-def _build_prompt(summary, fields, previous_evals=None, custom_style=""):
+def _achievement_lines(ach):
+    """把单个学生的课测逐题数据格式化成 prompt 行（无数据返回空串）。"""
+    if not ach:
+        return ""
+    lines = [
+        f"   本次课测（{_short_lesson(ach['lesson_name'])}，{ach['lesson_time'][:10]}）："
+        f"得分率 {ach['score_rate'] * 100:.0f}%（正确 {ach['correct_count']} 题）"
+    ]
+    if ach["wrongs"]:
+        lines.append("   答错题目（供讲评参考）：")
+        for w in ach["wrongs"]:
+            stem = re.sub(r"\s+", "", w["stem"])[:60]
+            chosen = f"，该生选了 {w['choice']}" if w["choice"] else ""
+            lines.append(
+                f"   - {w['question_key']}（知识点：{w['knowledge_point'] or '未知'}）："
+                f"{stem}…（正确答案 {w['correct_option']}{chosen}）"
+            )
+            if w["reply_template"]:
+                lines.append(f"     讲评模板：{w['reply_template']}")
+    return "\n".join(lines)
+
+
+def _short_lesson(name):
+    """课节长名缩写（如 U260724-…-P9-递推算法（二） → P9-递推算法（二））。"""
+    m = re.search(r"(P\d+-\S+)", str(name))
+    return m.group(1) if m else str(name)
+
+
+def _build_prompt(summary, fields, previous_evals=None, custom_style="", achievement=None):
     """构建发送给 LLM 的 prompt。
 
     summary: 有记录的学生汇总列表
     fields: 选定的依据字段列表
     previous_evals: {学生姓名: [历史评价文本, ...]}，用于综合参考
     custom_style: 自定义评价语模板，LLM 据此生成风格一致的评价
+    achievement: {学生姓名: {课测逐题数据}}，含答错题目与用户配置的讲评模板
     """
     field_labels = "、".join(fields)
+    has_template = any(
+        w.get("reply_template") for a in (achievement or {}).values() for w in a.get("wrongs", [])
+    )
     lines = []
     for i, s in enumerate(summary, 1):
         data_parts = [f"{f}={_format_value(f, s.get(f, 0))}" for f in fields]
@@ -49,6 +81,9 @@ def _build_prompt(summary, fields, previous_evals=None, custom_style=""):
         if previous_evals and s["学生姓名"] in previous_evals:
             evals = previous_evals[s["学生姓名"]]
             line += f"\n   历史评价：{' ｜ '.join(evals)}"
+        ach_text = _achievement_lines((achievement or {}).get(s["学生姓名"]))
+        if ach_text:
+            line += f"\n{ach_text}"
         lines.append(line)
 
     students_text = "\n".join(lines)
@@ -57,6 +92,12 @@ def _build_prompt(summary, fields, previous_evals=None, custom_style=""):
         style_hint = (
             f"\n参考评价风格：\n{custom_style}\n\n"
             f"请模仿以上评价的语气、句式、措辞风格来生成每位学生的评价，但数据部分要根据每位学生的实际情况填写。\n\n"
+        )
+    template_rule = ""
+    if has_template:
+        template_rule = (
+            "6. 若学生带有「讲评模板」，评价中必须围绕该模板的讲解思路展开："
+            "点出错因、结合正确答案说明该知识点，并给出鼓励；没有讲评模板的错题只需简要提及\n"
         )
     return (
         f"你是一位经验丰富的教师，请根据以下学生的课堂表现数据，为每个学生写一段简短的评价。\n\n"
@@ -68,7 +109,8 @@ def _build_prompt(summary, fields, previous_evals=None, custom_style=""):
         f"2. 基于选定字段的数据给出具体、有针对性的评价\n"
         f"3. 语气鼓励、积极向上，先肯定优点再给改进建议\n"
         f"4. 评价中必须用「XX同学」称呼学生，如「昊萌同学」，不要只写姓名\n"
-        f"5. 如有历史评价，请参考并体现学生的进步与变化\n\n"
+        f"5. 如有历史评价，请参考并体现学生的进步与变化\n"
+        f"{template_rule}\n"
         f"请严格按以下 JSON 数据结构输出，students 数组必须包含上面列出的每一位学生：\n"
         f'{{"students": [{{"name": "学生姓名", "evaluation": "该学生的评价内容"}}, ...]}}\n'
         f"其中 name 必须与上面给出的学生姓名完全一致（不要加序号、引号或「同学」后缀）；\n"
@@ -76,7 +118,7 @@ def _build_prompt(summary, fields, previous_evals=None, custom_style=""):
     )
 
 
-def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_style=""):
+def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_style="", achievement=None):
     """调用 DeepSeek API 为每个学生生成评价。
 
     参数：
@@ -103,7 +145,7 @@ def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_s
     base_url = getattr(config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com") if config else "https://api.deepseek.com"
     model = datastore.get_model_name()
 
-    prompt = _build_prompt(students, fields, previous_evals, custom_style)
+    prompt = _build_prompt(students, fields, previous_evals, custom_style, achievement)
 
     def _call(use_json_mode):
         """请求一次 API。use_json_mode 控制 response_format，失败可降级重试。"""
