@@ -296,12 +296,46 @@ def parse_wrong_students(text):
     return students
 
 
-def parse_achievement(filebytes):
-    """解析课堂成就明细 Excel（含「逐题明细」「错题清单」两个工作表）。
+def _read_achievement_csv(filebytes):
+    """读取逐题明细 CSV：编码（utf-8-sig / gb18030）与分隔符（逗号/分号/制表）自适应。
+
+    sep=None 让 csv.Sniffer 自动识别分隔符（中文 Excel 可能导出分号或制表分隔），
+    engine="python" 是使用 Sniffer 的前提。CSV 没有「错题清单」第二张表，故只当
+    「逐题明细」单表处理。
+    """
+    last = None
+    for enc in ("utf-8-sig", "gb18030"):
+        try:
+            return pd.read_csv(io.BytesIO(filebytes), encoding=enc, sep=None, engine="python")
+        except UnicodeDecodeError as e:
+            last = e
+    raise last
+
+
+def _achievement_frames(filebytes, filename=""):
+    """按文件类型返回 DataFrame 列表：Excel 可含多个工作表，CSV 是单表。"""
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if ext in ("xlsx", "xls"):
+        return list(pd.read_excel(io.BytesIO(filebytes), sheet_name=None).values())
+    if ext == "csv":
+        return [_read_achievement_csv(filebytes)]
+    # 未知扩展名：按内容嗅探（xlsx 是 zip 魔数 PK，xls 是 OLE 魔数，其余当 CSV）
+    head = (filebytes or b"")[:4]
+    if head[:2] == b"PK" or head[:4] == b"\xd0\xcf\x11\xe0":
+        return list(pd.read_excel(io.BytesIO(filebytes), sheet_name=None).values())
+    return [_read_achievement_csv(filebytes)]
+
+
+def parse_achievement(filebytes, filename=""):
+    """解析课堂成就明细（含「逐题明细」「错题清单」）Excel 或 CSV。
 
     逐题明细：每个学生一行，基础列（课节名称/开课时间/学生姓名/正确数/得分率/
               奖杯数/出勤总奖杯数/班级）+ 动态题目列（列名即题号，值为 对/错）。
     错题清单：每题一行（题目/类型/题干/选项/正确选项/知识点/错题学生明细）。
+
+    Excel 可能是「逐题明细 + 错题清单」两个工作表；CSV 只有一张表（视为逐题明细，
+    无错题清单元数据，但每题对错仍保存）。地址 filename 用来判断是 Excel 还是 CSV，
+    记不清扩展名时按内容嗅探。
 
     返回:
       {
@@ -312,9 +346,8 @@ def parse_achievement(filebytes):
       }
     一个文件只允许包含一个课节（真实导出即如此），多个课节抛 ValueError。
     """
-    sheets = pd.read_excel(io.BytesIO(filebytes), sheet_name=None)
     detail = wrong = None
-    for df in sheets.values():
+    for df in _achievement_frames(filebytes, filename):
         cols = {str(c).strip() for c in df.columns}
         if {"课节名称", "学生姓名"} <= cols:
             detail = df

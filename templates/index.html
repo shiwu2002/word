@@ -69,9 +69,9 @@
       <div class="card-head">
         <h2>导入课堂成就明细（逐题）</h2>
       </div>
-      <p class="muted">上传含「逐题明细 / 错题清单」工作表的课堂成就明细 Excel。系统保存每位学生在每道<strong>课堂小测 / 课后作业</strong>题的对错，用于学生评价与错题讲评。同一课节重复导入会覆盖旧数据（已配置的讲评模板保留）。导入后到「学生评价」标签为每道题配置<strong>错题讲评模板</strong>。</p>
+      <p class="muted">上传课堂成就明细：<strong>Excel（含「逐题明细 / 错题清单」工作表）或 CSV</strong>。系统保存每位学生在每道<strong>课堂小测 / 课后作业</strong>题的对错，用于学生评价与错题讲评。同一课节重复导入会覆盖旧数据（已配置的讲评模板保留）。导入后到「学生评价」标签为每道题配置<strong>错题讲评模板</strong>。</p>
       <form method="post" action="{{ url_for('achievement_import') }}" enctype="multipart/form-data" class="upload-form">
-        <input type="file" name="file" accept=".xlsx,.xls" required>
+        <input type="file" name="file" accept=".xlsx,.xls,.csv" required>
         <button class="btn btn-primary" type="submit">导入逐题明细</button>
       </form>
     </div>

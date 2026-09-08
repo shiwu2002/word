@@ -29,5 +29,39 @@
     {% block content %}{% endblock %}
   </main>
   {% block scripts %}{% endblock %}
+  <script>
+    /* 页面生命周期心跳（单例模型）：
+       每个页签一个会话 token（sessionStorage 保证同页签导航/刷新不改变），
+       定时上报「我还在」；页面真正关闭时用 sendBeacon 上报「我要走了」。
+       服务端据此在最后一个页签关闭后自动关停后端，避免残留进程。 */
+    (function () {
+      var token = null;
+      try {
+        token = sessionStorage.getItem("biscuit_session");
+        if (!token) {
+          token = (window.crypto && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : "t-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+          sessionStorage.setItem("biscuit_session", token);
+        }
+      } catch (e) {
+        token = "t-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+      }
+      var HEARTBEAT_INTERVAL = 5000;
+      function ping(leave, reg) {
+        try {
+          var url = "/api/heartbeat?t=" + encodeURIComponent(token);
+          if (leave) { url += "&leave=1"; }
+          else if (reg) { url += "&reg=1"; }
+          navigator.sendBeacon(url);
+        } catch (e) {}
+      }
+      /* 页面加载：首次上报带 reg=1，用于撤销同页签导航前的 pending leave */
+      ping(false, true);
+      /* 定时保活：不带 reg，不会误取消「我要走了」 */
+      setInterval(function () { ping(false, false); }, HEARTBEAT_INTERVAL);
+      window.addEventListener("pagehide", function () { ping(true, false); });
+    })();
+  </script>
 </body>
 </html>

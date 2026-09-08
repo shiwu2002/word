@@ -10,7 +10,9 @@
 import os
 import sys
 import sqlite3
+import tempfile
 import threading
+import time
 import webbrowser
 
 from flask import (
@@ -245,15 +247,20 @@ def achievement_import():
         flash("请选择课堂成就明细文件", "error")
         return redirect(url_for("index"))
     try:
-        data = parse_achievement(f.read())
+        data = parse_achievement(f.read(), filename=f.filename)
     except ValueError as e:
         flash(f"成就明细解析失败：{e}", "error")
         return redirect(url_for("index"))
     n_students, n_questions = save_achievement(data)
     wrong_total = sum(len(q["wrong_students"]) for q in data["questions"])
+    # 实际逐题结果（答对/答错）的道数：来自学生每题 results 的并集（CSV 无错题清单时用）
+    q_keys = set()
+    for st in data["students"]:
+        q_keys.update(st["results"])
+    n_qkeys = len(q_keys)
     flash(
         f"已导入课堂成就明细：{data['lesson_name']}（{data['lesson_time'][:10]}）— "
-        f"{n_students} 名学生、{n_questions} 道题、{wrong_total} 人次答错。"
+        f"{n_students} 名学生、{max(n_questions, n_qkeys)} 道题、{wrong_total} 人次答错。"
         "可到「学生评价」标签为每道题配置讲评模板。",
         "success",
     )
@@ -422,11 +429,168 @@ def classes_evaluate(cid):
     return redirect(url_for("index", class_id=cid))
 
 
+# ---------------- 单实例 & 页面生命周期 ----------------
+# 打包环境（console=False）没有任何窗口/托盘可用来退出，进程会一直挂在后台。
+# 这里把应用做成「单例模型」：
+#   1) 单实例锁：同一台机器只允许一个后端在跑；重复启动只打开已有页面后退出。
+#   2) 页面守护：每个打开的页面定时上报心跳；当最后一个页面关闭（或浏览器崩溃、
+#      被杀）后自动关停后端，避免「关闭网页后后端服务残留」。
+
+_LOCK_PATH = os.path.join(tempfile.gettempdir(), "biscuit-word-data-instance.lock")
+
+_heartbeats = {}      # token -> 最近心跳时间
+_leaving = {}         # token -> 请求离开时间（用于区分「同页签导航/刷新」与「真正关闭」）
+_heartbeat_lock = threading.Lock()
+_HEARTBEAT_TIMEOUT = 600.0   # 心跳超时兜底：浏览器崩溃/被系统杀掉后清理孤儿进程
+_LEAVE_GRACE = 6.0           # leave 后宽限：同页签导航/刷新会在此窗口内重新注册心跳
+_MONITOR_INTERVAL = 3.0
+_STARTUP_GRACE = 20.0        # 启动宽限：给浏览器自动打开并注册心跳留时间
+
+_server_handle = None        # werkzeug server（monitor 线程里用于关停）
+_server_started = 0.0
+
+
+class _SingleInstance:
+    """跨平台单实例锁（OS 文件锁）。进程退出时内核自动释放，不会残留失效锁。"""
+
+    def __init__(self, path):
+        self._path = path
+        self._fd = None
+
+    def _close_fd(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    def acquire(self):
+        # 用局部 fd，避免重复 acquire 时覆盖 self._fd 而泄漏首次加锁的句柄
+        fd = None
+        try:
+            parent = os.path.dirname(self._path)
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent, exist_ok=True)
+            fd = os.open(self._path, os.O_RDWR | os.O_CREAT)
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+            self._fd = fd
+            return True
+        except OSError:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            return False
+
+    def release(self):
+        if self._fd is not None:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(self._fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            self._close_fd()
+
+
+@app.route("/api/heartbeat", methods=["GET", "POST"])
+def api_heartbeat():
+    """页面生命周期心跳：页面上报「我还在 / 我要走了 / 我(重新)加载了」。
+
+    - leave=1：该页签请求离开（真实关闭 → 在宽限期后清理；导航/刷新会有 reg=1 取消它）。
+    - reg=1 ：页面(重新)加载（导航/刷新），取消同页签的 pending leave，重新算存活。
+    - 其它  ：普通保活，只刷新心跳；**不**取消 pending leave（避免关闭瞬间的在途
+              保活心跳把「我要走了」误判为「我还在」）。
+    """
+    payload = request.get_json(silent=True) or {}
+    token = request.args.get("t") or payload.get("t")
+    leave = request.args.get("leave") or payload.get("leave")
+    reg = request.args.get("reg") or payload.get("reg")
+    if token:
+        now = time.time()
+        with _heartbeat_lock:
+            if leave in ("1", "true", True):
+                _leaving[token] = now
+            else:
+                _heartbeats[token] = now
+                if reg in ("1", "true", True):
+                    _leaving.pop(token, None)  # 新页面加载：撤销先前的离开标记
+    return {"ok": True}
+
+
+def _prune_and_orphaned():
+    """清理过期客户端；返回是否已无任何活动页面（应关停后端）。"""
+    now = time.time()
+    if now - _server_started < _STARTUP_GRACE:  # 启动期别误杀（等浏览器注册心跳）
+        return False
+    with _heartbeat_lock:
+        for t in list(_heartbeats):
+            if now - _heartbeats[t] > _HEARTBEAT_TIMEOUT:
+                del _heartbeats[t]
+                _leaving.pop(t, None)
+        for t in list(_leaving):
+            if now - _leaving[t] > _LEAVE_GRACE:
+                del _leaving[t]
+                _heartbeats.pop(t, None)
+    return not _heartbeats and not _leaving
+
+
+def _stop_server():
+    h = _server_handle
+    if h is not None:
+        try:
+            h.shutdown()
+        except Exception:
+            pass
+
+
+def _monitor_loop():
+    while True:
+        time.sleep(_MONITOR_INTERVAL)
+        if _prune_and_orphaned():
+            _stop_server()
+            return
+
+
 # 只有直接运行本文件时才启动开发服务器。
 if __name__ == "__main__":
+    host, port = "127.0.0.1", 5000
+    url = f"http://{host}:{port}/"
     if getattr(sys, "frozen", False):
+        # 单实例：已有实例则只打开已有页面，不重复起服务
+        inst = _SingleInstance(_LOCK_PATH)
+        if not inst.acquire():
+            threading.Timer(0.3, lambda: webbrowser.open(url)).start()
+            sys.exit(0)
+        try:
+            from werkzeug.serving import make_server
+            server = make_server(host, port, app, threaded=True)
+        except OSError:
+            # 端口被占用（如历史残留进程）：打开已有页面后退出
+            threading.Timer(0.3, lambda: webbrowser.open(url)).start()
+            sys.exit(0)
+        _server_started = time.time()
+        _server_handle = server
+        threading.Thread(target=_monitor_loop, daemon=True).start()
         # 打包环境：延迟打开浏览器；不能用 debug（reloader 与 PyInstaller 不兼容）
-        threading.Timer(1.5, lambda: webbrowser.open("http://127.0.0.1:5000/")).start()
-        app.run(debug=False, host="127.0.0.1", port=5000)
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
+            inst.release()
     else:
-        app.run(debug=True, host="127.0.0.1", port=5000)
+        app.run(debug=True, host=host, port=port)
