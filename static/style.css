@@ -300,3 +300,38 @@ input[type=password] {
 
 /* 补课标记（紫色，区别于正确率的红/琥珀/绿） */
 .tag-makeup { background: #7c3aed; }
+
+/* ---------------- 多文档上传（课时） ---------------- */
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0;
+  margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.dropzone {
+  border: 1.5px dashed var(--border); border-radius: 10px;
+  padding: 16px; text-align: center; background: #fbfcfd;
+  transition: all .15s; margin-bottom: 12px;
+}
+.dropzone:hover { border-color: var(--primary); background: #f5f8ff; }
+.dropzone.dragging { border-color: var(--primary); background: #eef4ff; }
+.dropzone.has-files { text-align: left; }
+.dropzone-hint { color: var(--muted); font-size: 13px; }
+.dropzone-hint .link { color: var(--primary); cursor: pointer; text-decoration: underline; }
+.file-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.chip-file {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #eef2ff; border: 1px solid #c7d2fe; color: #3730a3;
+  border-radius: 14px; padding: 4px 8px 4px 12px; font-size: 12px; max-width: 280px;
+}
+.chip-file .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-file .chip-size { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.chip-file.chip-bad { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.chip-file.chip-bad .chip-size { color: #b91c1c; }
+.chip-x {
+  width: 18px; height: 18px; line-height: 1; border: none; border-radius: 50%;
+  background: #c7d2fe; color: #3730a3; font-size: 14px; cursor: pointer;
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+}
+.chip-x:hover { background: var(--danger); color: #fff; }
+.dropzone-actions {
+  display: flex; align-items: center; justify-content: space-between; margin-top: 10px; gap: 10px;
+}

@@ -47,10 +47,21 @@
       <div class="card-head">
         <h2>上传课时数据</h2>
       </div>
-      <p class="muted">上传课堂成就明细（.xlsx/.xls/.csv），系统会<strong>按学生姓名自动路由到其所属班级</strong>进行合并（相同 课节+时间+学生 覆盖旧值）。<strong>不在任何班级名单中的学生，会自动记入「默认名单」班</strong>。每次合并生成可回退的版本。</p>
-      <form method="post" action="{{ url_for('lessons_upload') }}" enctype="multipart/form-data" class="upload-form">
-        <input type="file" name="files" multiple accept=".xlsx,.xls,.csv" required>
-        <button class="btn btn-warn" type="submit">上传并合并</button>
+      <p class="muted">上传课堂成就明细（.xlsx/.xls/.csv），系统会<strong>按学生姓名自动路由到其所属班级</strong>进行合并（相同 课节+时间+学生 覆盖旧值）。<strong>不在任何班级名单中的学生，会自动记入「默认名单」班</strong>。每次合并生成可回退的版本。支持一次选择或拖入<strong>多个文档</strong>。</p>
+      <form method="post" action="{{ url_for('lessons_upload') }}" enctype="multipart/form-data" id="lessonUploadForm">
+        <div class="dropzone" id="lessonDrop">
+          <div class="dropzone-hint">
+            把多个 .xlsx / .xls / .csv 文档拖到这里，或
+            <span class="link" id="lessonPickTrigger">点击选择文档</span>
+          </div>
+          <div class="file-chips" id="lessonChips"></div>
+          <div class="dropzone-actions">
+            <span class="muted small" id="lessonCount">已选 0 个文档</span>
+            <button type="button" class="btn btn-ghost btn-small" id="lessonClear">清空</button>
+          </div>
+        </div>
+        <input type="file" name="files" id="lessonInput" multiple accept=".xlsx,.xls,.csv" class="visually-hidden" required>
+        <button class="btn btn-warn" type="submit" id="lessonSubmit" disabled>上传并合并</button>
       </form>
     </div>
 
@@ -903,6 +914,72 @@
       if (saved && document.getElementById('subtab-' + saved)) sub = saved;
     } catch (e) {}
     activateRankSubtab(sub);
+  }
+
+  // ------- 课时上传：多文档选择 / 拖拽 / 移除 / 清空（仍是原生表单提交，flash 正常） -------
+  const lessonInput = document.getElementById('lessonInput');
+  const lessonDrop = document.getElementById('lessonDrop');
+  const lessonPick = document.getElementById('lessonPickTrigger');
+  const lessonChips = document.getElementById('lessonChips');
+  const lessonCount = document.getElementById('lessonCount');
+  const lessonClear = document.getElementById('lessonClear');
+  const lessonSubmit = document.getElementById('lessonSubmit');
+  const LESSON_EXT = ['.xlsx', '.xls', '.csv'];
+
+  function lessonFileList(){ return Array.from(lessonInput.files); }
+  function lessonSize(b){
+    if (!b) return '';
+    return b > 1048576 ? (b / 1048576).toFixed(1) + 'M' : Math.max(1, Math.round(b / 1024)) + 'K';
+  }
+  function rebuildLessonInput(files){
+    const dt = new DataTransfer();
+    files.forEach(f => dt.items.add(f));
+    lessonInput.files = dt.files;   // 用 DataTransfer 重建 FileList，实现删除/清空/追加
+  }
+  function renderLessonUi(){
+    const fs = lessonFileList();
+    lessonChips.innerHTML = fs.map((f, i) => {
+      const bad = !LESSON_EXT.some(ext => f.name.toLowerCase().endsWith(ext));
+      return `<span class="chip chip-file ${bad ? 'chip-bad' : ''}" title="${esc(f.name)}">
+        <span class="chip-name">${esc(f.name)}</span>
+        <span class="chip-size">${lessonSize(f.size)}</span>
+        <button type="button" class="chip-x" data-i="${i}" title="移除">&times;</button>
+      </span>`;
+    }).join('');
+    lessonChips.querySelectorAll('.chip-x').forEach(b =>
+      b.addEventListener('click', e => {
+        e.preventDefault(); e.stopPropagation();   // 避免冒泡触发「点击打开选择框」
+        const fs = lessonFileList(); fs.splice(Number(b.dataset.i), 1);
+        rebuildLessonInput(fs); renderLessonUi();
+      }));
+    lessonCount.textContent = `已选 ${fs.length} 个文档`;
+    lessonSubmit.textContent = fs.length ? `上传并合并 ${fs.length} 个文档` : '上传并合并';
+    lessonSubmit.disabled = fs.length === 0;
+    lessonDrop.classList.toggle('has-files', fs.length > 0);
+  }
+  function appendLessonFiles(list){
+    const dt = new DataTransfer();
+    lessonFileList().concat(list).forEach(f => dt.items.add(f));
+    lessonInput.files = dt.files;
+    renderLessonUi();
+  }
+
+  if (lessonInput && lessonDrop) {
+    const open = e => { e.preventDefault(); lessonInput.click(); };
+    lessonPick.addEventListener('click', e => { e.stopPropagation(); open(e); });
+    lessonDrop.addEventListener('click', e => {
+      if (e.target.closest('.chip-x') || e.target.closest('button')) return; // 交互控件
+      open(e);
+    });
+    lessonInput.addEventListener('change', renderLessonUi);
+    lessonDrop.addEventListener('dragover', e => { e.preventDefault(); lessonDrop.classList.add('dragging'); });
+    lessonDrop.addEventListener('dragleave', () => lessonDrop.classList.remove('dragging'));
+    lessonDrop.addEventListener('drop', e => {
+      e.preventDefault(); lessonDrop.classList.remove('dragging');
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length) appendLessonFiles(files);
+    });
+    lessonClear.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); lessonInput.value = ''; renderLessonUi(); });
   }
 </script>
 {% endblock %}

@@ -23,7 +23,7 @@ from datastore import (
     init_db, list_classes, get_class, rename_class, delete_class,
     import_roster, get_roster,
     get_current_records, list_versions, rollback,
-    get_setting, set_setting, get_api_key,
+    get_setting, set_setting, get_api_key, get_model_name,
     save_evaluations, get_evaluations,
     get_previous_evals_by_student, get_history_evaluations,
 )
@@ -34,7 +34,7 @@ from parser import (
 )
 from integration import route_merge_lessons
 from config import SUMMARY_FIELDS
-from llm import generate_evaluations
+from llm import generate_evaluations, list_models
 
 def resource_path(rel):
     """定位资源文件路径，兼容 PyInstaller 打包环境。
@@ -304,13 +304,17 @@ def classes_export(cid):
 
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
-    """设置页面：配置 DeepSeek API key。"""
+    """设置页面：配置 DeepSeek API key 与模型名称。"""
     if request.method == "POST":
         key = request.form.get("api_key", "").strip()
+        model = request.form.get("model", "").strip()
         if key:
             set_setting("deepseek_api_key", key)
             flash("API key 已保存", "success")
-        else:
+        if model:
+            set_setting("deepseek_model", model)
+            flash(f"模型名称已保存：{model}", "success")
+        if not key and not model:
             flash("API key 不能为空", "error")
         return redirect(url_for("settings"))
     current_key = get_api_key()
@@ -322,7 +326,15 @@ def settings():
         "settings.html",
         masked_key=masked,
         has_key=bool(current_key),
+        model_name=get_model_name(),
     )
+
+
+@app.route("/api/models")
+def api_models():
+    """返回当前 API key 可用的模型列表（来自 /models 端点），供设置页下拉。"""
+    models, error = list_models()
+    return {"models": models, "error": error}
 
 
 @app.route("/classes/<int:cid>/evaluate", methods=["POST"])

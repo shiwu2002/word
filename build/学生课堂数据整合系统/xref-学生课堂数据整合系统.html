@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8">
-    <title>modulegraph cross reference for app.py, pyi_rth_cryptography_openssl.py, pyi_rth_inspect.py, pyi_rth_multiprocessing.py, pyi_rth_pkgutil.py, pyi_rth_setuptools.py</title>
+    <title>modulegraph cross reference for app.py, pyi_rth_cryptography_openssl.py, pyi_rth_inspect.py, pyi_rth_multiprocessing.py, pyi_rth_pkgutil.py, pyi_rth_setuptools.py, runtime_hook.py</title>
     <style>
       .node { padding: 0.5em 0 0.5em; border-top: thin grey dotted; }
       .moduletype { font: smaller italic }
@@ -11,7 +11,7 @@
     </style>
   </head>
   <body>
-    <h1>modulegraph cross reference for app.py, pyi_rth_cryptography_openssl.py, pyi_rth_inspect.py, pyi_rth_multiprocessing.py, pyi_rth_pkgutil.py, pyi_rth_setuptools.py</h1>
+    <h1>modulegraph cross reference for app.py, pyi_rth_cryptography_openssl.py, pyi_rth_inspect.py, pyi_rth_multiprocessing.py, pyi_rth_pkgutil.py, pyi_rth_setuptools.py, runtime_hook.py</h1>
 
 <div class="node">
   <a name="app.py"></a>
@@ -153,6 +153,7 @@ imports:
  &#8226;   <a href="#functools">functools</a>
  &#8226;   <a href="#genericpath">genericpath</a>
  &#8226;   <a href="#heapq">heapq</a>
+ &#8226;   <a href="#integration">integration</a>
  &#8226;   <a href="#io">io</a>
  &#8226;   <a href="#keyword">keyword</a>
  &#8226;   <a href="#linecache">linecache</a>
@@ -176,6 +177,7 @@ imports:
  &#8226;   <a href="#re._parser">re._parser</a>
  &#8226;   <a href="#reprlib">reprlib</a>
  &#8226;   <a href="#requests">requests</a>
+ &#8226;   <a href="#runtime_hook.py">runtime_hook.py</a>
  &#8226;   <a href="#sqlite3">sqlite3</a>
  &#8226;   <a href="#sre_compile">sre_compile</a>
  &#8226;   <a href="#sre_constants">sre_constants</a>
@@ -273,6 +275,23 @@ imports:
     <a href="#_distutils_hack">_distutils_hack</a>
  &#8226;   <a href="#os">os</a>
  &#8226;   <a href="#setuptools">setuptools</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#app.py">app.py</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="runtime_hook.py"></a>
+  <a target="code" href="///E:/Python/word/runtime_hook.py" type="text/plain"><tt>runtime_hook.py</tt></a>
+<span class="moduletype">Script</span>  <div class="import">
+imports:
+    <a href="#io">io</a>
+ &#8226;   <a href="#sys">sys</a>
 
   </div>
   <div class="import">
@@ -15172,6 +15191,8 @@ imports:
   <div class="import">
 imported by:
     <a href="#app.py">app.py</a>
+ &#8226;   <a href="#integration">integration</a>
+ &#8226;   <a href="#llm">llm</a>
 
   </div>
 
@@ -22316,6 +22337,23 @@ imported by:
 </div>
 
 <div class="node">
+  <a name="integration"></a>
+  <a target="code" href="///E:/Python/word/integration.py" type="text/plain"><tt>integration</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#datastore">datastore</a>
+ &#8226;   <a href="#parser">parser</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#app.py">app.py</a>
+
+  </div>
+
+</div>
+
+<div class="node">
   <a name="io"></a>
   <a target="code" href="///C:/Users/84857/AppData/Local/Programs/Python/Python313/Lib/io.py" type="text/plain"><tt>io</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
@@ -22440,6 +22478,7 @@ imported by:
  &#8226;   <a href="#requests.models">requests.models</a>
  &#8226;   <a href="#requests.utils">requests.utils</a>
  &#8226;   <a href="#runpy">runpy</a>
+ &#8226;   <a href="#runtime_hook.py">runtime_hook.py</a>
  &#8226;   <a href="#setuptools._vendor.backports.tarfile">setuptools._vendor.backports.tarfile</a>
  &#8226;   <a href="#setuptools._vendor.wheel.macosx_libfile">setuptools._vendor.wheel.macosx_libfile</a>
  &#8226;   <a href="#setuptools._vendor.wheel.wheelfile">setuptools._vendor.wheel.wheelfile</a>
@@ -23585,6 +23624,7 @@ imported by:
  &#8226;   <a href="#json.decoder">json.decoder</a>
  &#8226;   <a href="#json.encoder">json.encoder</a>
  &#8226;   <a href="#json.scanner">json.scanner</a>
+ &#8226;   <a href="#llm">llm</a>
  &#8226;   <a href="#multiprocessing.resource_tracker">multiprocessing.resource_tracker</a>
  &#8226;   <a href="#numpy.__config__">numpy.__config__</a>
  &#8226;   <a href="#numpy.testing._private.utils">numpy.testing._private.utils</a>
@@ -23727,6 +23767,8 @@ imported by:
 <span class="moduletype">SourceModule</span>  <div class="import">
 imports:
     <a href="#config">config</a>
+ &#8226;   <a href="#datastore">datastore</a>
+ &#8226;   <a href="#json">json</a>
  &#8226;   <a href="#re">re</a>
  &#8226;   <a href="#requests">requests</a>
 
@@ -50542,11 +50584,13 @@ imports:
  &#8226;   <a href="#datetime">datetime</a>
  &#8226;   <a href="#io">io</a>
  &#8226;   <a href="#pandas">pandas</a>
+ &#8226;   <a href="#re">re</a>
 
   </div>
   <div class="import">
 imported by:
     <a href="#app.py">app.py</a>
+ &#8226;   <a href="#integration">integration</a>
 
   </div>
 
@@ -59705,6 +59749,7 @@ imported by:
  &#8226;   <a href="#pandas.io.sql">pandas.io.sql</a>
  &#8226;   <a href="#pandas.util._exceptions">pandas.util._exceptions</a>
  &#8226;   <a href="#pandas.util.version">pandas.util.version</a>
+ &#8226;   <a href="#parser">parser</a>
  &#8226;   <a href="#pdb">pdb</a>
  &#8226;   <a href="#pickle">pickle</a>
  &#8226;   <a href="#pickletools">pickletools</a>
@@ -65658,6 +65703,7 @@ imported by:
  &#8226;   <a href="#requests.sessions">requests.sessions</a>
  &#8226;   <a href="#requests.utils">requests.utils</a>
  &#8226;   <a href="#runpy">runpy</a>
+ &#8226;   <a href="#runtime_hook.py">runtime_hook.py</a>
  &#8226;   <a href="#selectors">selectors</a>
  &#8226;   <a href="#setuptools">setuptools</a>
  &#8226;   <a href="#setuptools._distutils">setuptools._distutils</a>

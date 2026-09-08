@@ -16,8 +16,45 @@
 
   <form method="post" class="settings-form">
     <label for="api_key">API Key</label>
-    <input type="password" name="api_key" id="api_key" placeholder="sk-..." autocomplete="off">
+    <input type="password" name="api_key" id="api_key" placeholder="sk-...（留空则不修改）" autocomplete="off">
+    <label for="model">模型名称</label>
+    <select name="model" id="model">
+      <option value="{{ model_name }}" selected>{{ model_name }}</option>
+    </select>
     <button type="submit" class="btn btn-primary">保存</button>
   </form>
+  <p class="muted small" style="margin-top: 10px;">
+    可用模型从 /models 端点自动获取，<span id="modelFetchStatus">获取中...</span>
+  </p>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 页面加载时从 /api/models 获取当前 key 可用的模型列表，填充选择框
+  fetch('{{ url_for("api_models") }}')
+    .then(r => r.json())
+    .then(d => {
+      const status = document.getElementById('modelFetchStatus');
+      if (d.error || !(d.models && d.models.length)) {
+        status.textContent = '获取失败：' + (d.error || '列表为空');
+        return;
+      }
+      const sel = document.getElementById('model');
+      const cur = sel.value;
+      sel.innerHTML = d.models.map(m =>
+        `<option value="${m}" ${m === cur ? 'selected' : ''}>${m}</option>`).join('');
+      // 当前存储的模型不在可用列表里时，保留在首位以免丢失
+      if (!d.models.includes(cur)) {
+        const opt = document.createElement('option');
+        opt.value = opt.textContent = cur;
+        opt.selected = true;
+        sel.insertBefore(opt, sel.firstChild);
+      }
+      status.textContent = `共 ${d.models.length} 个可用模型`;
+    })
+    .catch(() => {
+      document.getElementById('modelFetchStatus').textContent = '获取失败（网络异常）';
+    });
+</script>
 {% endblock %}

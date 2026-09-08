@@ -5,12 +5,19 @@ DeepSeek 兼容 OpenAI 接口格式：
     POST {base_url}/chat/completions
     Header: Authorization: Bearer {api_key}
 
+结构化输出约定：让模型按固定 JSON 数据结构回复，再解析该结构取每个学生的评价，
+避免按行解析时因评价折行、姓名带修饰等导致的解析错误。
+    {"students": [{"name": "学生姓名", "evaluation": "评价内容"}, ...]}
+
 调用流程：
     generate_evaluations(summary, fields, api_key) → (evaluations, error)
 """
+import json
 import re
 
 import requests
+
+import datastore
 
 try:
     import config
@@ -62,8 +69,10 @@ def _build_prompt(summary, fields, previous_evals=None, custom_style=""):
         f"3. 语气鼓励、积极向上，先肯定优点再给改进建议\n"
         f"4. 评价中必须用「XX同学」称呼学生，如「昊萌同学」，不要只写姓名\n"
         f"5. 如有历史评价，请参考并体现学生的进步与变化\n\n"
-        f"请严格按以下格式输出（每行一个学生，姓名后跟中文冒号和评价）：\n"
-        f"学生姓名：评价内容\n"
+        f"请严格按以下 JSON 数据结构输出，students 数组必须包含上面列出的每一位学生：\n"
+        f'{{"students": [{{"name": "学生姓名", "evaluation": "该学生的评价内容"}}, ...]}}\n'
+        f"其中 name 必须与上面给出的学生姓名完全一致（不要加序号、引号或「同学」后缀）；\n"
+        f"只输出 JSON，不要输出任何其它文字，不要用 markdown 代码块包裹。\n"
     )
 
 
@@ -92,28 +101,38 @@ def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_s
         return [], "该班级没有课时记录，无法生成评价"
 
     base_url = getattr(config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com") if config else "https://api.deepseek.com"
-    model = getattr(config, "DEEPSEEK_MODEL", "deepseek-chat") if config else "deepseek-chat"
+    model = datastore.get_model_name()
 
     prompt = _build_prompt(students, fields, previous_evals, custom_style)
 
-    try:
-        resp = requests.post(
+    def _call(use_json_mode):
+        """请求一次 API。use_json_mode 控制 response_format，失败可降级重试。"""
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "你是一位专业的、善于鼓励学生的教师。只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 4096,
+        }
+        if use_json_mode:
+            body["response_format"] = {"type": "json_object"}  # DeepSeek 的 JSON 输出模式
+        return requests.post(
             f"{base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "你是一位专业的、善于鼓励学生的教师。"},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 4096,
-            },
-            timeout=60,
+            json=body,
+            timeout=120,
         )
+
+    try:
+        resp = _call(use_json_mode=True)
+        # 个别模型/网关不支持 response_format 时降级为普通模式重试一次
+        if resp.status_code == 400 and "response_format" in resp.text:
+            resp = _call(use_json_mode=False)
     except requests.exceptions.RequestException as e:
         return [], f"网络请求失败：{e}"
 
@@ -135,24 +154,105 @@ def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_s
     return evaluations, None
 
 
-def _parse_evaluations(content, students):
-    """从 LLM 返回的文本中解析每个学生的评价。
+def list_models():
+    """调用 /models 端点获取当前 API key 可用的模型列表。
 
-    支持格式：姓名：评价 或 姓名: 评价
-    自动去除行首序号前缀（如 "1. 张三"）。
+    DeepSeek 兼容 OpenAI 的 GET {base_url}/models，返回
+    {"object": "list", "data": [{"id": "deepseek-chat", ...}, ...]}
+    返回 (model_id 列表, 错误信息)。
     """
-    student_names = {s["学生姓名"] for s in students}
-    evaluations = []
-    for line in content.strip().split("\n"):
-        line = line.strip()
-        if not line:
+    api_key = datastore.get_api_key()
+    if not api_key:
+        return [], "未配置 API key"
+    base_url = getattr(config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com") if config else "https://api.deepseek.com"
+    try:
+        resp = requests.get(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+    except requests.exceptions.RequestException as e:
+        return [], f"网络请求失败：{e}"
+    if resp.status_code != 200:
+        return [], f"获取模型列表失败({resp.status_code})"
+    try:
+        data = resp.json().get("data", [])
+        return sorted(m["id"] for m in data if m.get("id")), None
+    except (ValueError, KeyError, TypeError):
+        return [], "模型列表返回格式异常"
+
+
+def _extract_json(content):
+    """从模型返回文本中尽力提取并解析 JSON 对象，失败返回 None。
+
+    依次尝试：整段直解 → markdown 代码块 → 第一个配平的 {...} 片段。
+    """
+    content = content.strip()
+    # 1) 返回内容本身就是纯 JSON
+    try:
+        return json.loads(content)
+    except (ValueError, TypeError):
+        pass
+    # 2) ```json ... ``` 代码块
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.S)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (ValueError, TypeError):
+            pass
+    # 3) 扫描第一个花括号配平的 {...} 片段（容忍模型在前后混入说明文字）
+    start = content.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(content)):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(content[start:i + 1])
+                    except (ValueError, TypeError):
+                        break  # 该片段不是合法 JSON，从下一个 { 继续
+        start = content.find("{", start + 1)
+    return None
+
+
+def _norm_name(name):
+    """姓名归一化：去空白、各类引号括号与「同学」后缀，便于匹配名单。"""
+    s = re.sub(r"[\s「」『』'\'\"“”，,。.]", "", str(name))
+    return s[:-2] if s.endswith("同学") else s
+
+
+def _parse_evaluations(content, students):
+    """解析模型按 JSON 数据结构返回的评价，匹配到班级名单后输出。
+
+    兼容形态：
+        {"students": [{"name": "张三", "evaluation": "..."}]}   （约定结构）
+        {"students": {"张三": "..."}}                            （模型简写成映射）
+    返回 [{"student_name": 名单姓名, "evaluation": 文本}, ...]
+    """
+    data = _extract_json(content)
+    if not isinstance(data, dict):
+        return []
+    items = data.get("students")
+    if isinstance(items, dict):  # 映射形态 → 转成列表
+        items = [{"name": k, "evaluation": v} for k, v in items.items()]
+    if not isinstance(items, list):
+        return []
+
+    # 名单姓名按归一化形式建索引：归一化名 → 名单原始姓名
+    by_norm = {}
+    for s in students:
+        by_norm.setdefault(_norm_name(s["学生姓名"]), s["学生姓名"])
+
+    evaluations, seen = [], set()
+    for it in items:
+        if not isinstance(it, dict):
             continue
-        for sep in ("：", ":"):
-            if sep in line:
-                name, _, eval_text = line.partition(sep)
-                name = re.sub(r"^\d+\.\s*", "", name.strip())  # 去序号前缀
-                eval_text = eval_text.strip()
-                if name in student_names and eval_text:
-                    evaluations.append({"student_name": name, "evaluation": eval_text})
-                break
+        canonical = by_norm.get(_norm_name(it.get("name", "")))
+        text = str(it.get("evaluation", "")).strip()
+        if canonical and text and canonical not in seen:  # 每个学生只取第一条
+            evaluations.append({"student_name": canonical, "evaluation": text})
+            seen.add(canonical)
     return evaluations

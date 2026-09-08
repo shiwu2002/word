@@ -375,6 +375,18 @@ def get_api_key():
         return ""
 
 
+def get_model_name():
+    """获取模型名称：数据库设置优先，其次 config.py 配置，兜底 deepseek-chat。"""
+    db_model = get_setting("deepseek_model")
+    if db_model and db_model.strip():
+        return db_model.strip()
+    try:
+        import config
+        return config.DEEPSEEK_MODEL or "deepseek-chat"
+    except Exception:
+        return "deepseek-chat"
+
+
 # ---------------- 学生评价（留存历史） ----------------
 
 def save_evaluations(cid, evaluations, fields_used):

@@ -1625,6 +1625,7 @@
   ('inspect',
    'C:\\Users\\84857\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\inspect.py',
    'PYMODULE'),
+  ('integration', 'E:\\Python\\word\\integration.py', 'PYMODULE'),
   ('ipaddress',
    'C:\\Users\\84857\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\ipaddress.py',
    'PYMODULE'),
