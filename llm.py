@@ -175,18 +175,22 @@ def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_s
     base_url = getattr(config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com") if config else "https://api.deepseek.com"
     model = datastore.get_model_name()
 
-    prompt = _build_prompt(students, fields, previous_evals, custom_style, achievement)
+    # 分批请求：每条评价的输出长度不可控（模板模式下 ≈ 模板长度），
+    # 按模板长度估算单批人数，保证单次输出不超过 max_tokens 上限而截断。
+    # 实测 deepseek-v4 系接受 32768+ 输出；预算留足后常规班级单批即可完成。
+    out_per_student = (len(custom_style) + 200) if custom_style else 250
+    batch_size = max(1, min(len(students), 30000 // out_per_student))
 
-    def _call(use_json_mode):
+    def _call(chunk_prompt, use_json_mode):
         """请求一次 API。use_json_mode 控制 response_format，失败可降级重试。"""
         body = {
             "model": model,
             "messages": [
                 {"role": "system", "content": "你是一位专业的、善于鼓励学生的教师。只输出 JSON。"},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": chunk_prompt},
             ],
             "temperature": 0.7,
-            "max_tokens": 8192 if custom_style else 4096,
+            "max_tokens": 32768,
         }
         if use_json_mode:
             body["response_format"] = {"type": "json_object"}  # DeepSeek 的 JSON 输出模式
@@ -200,30 +204,35 @@ def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_s
             timeout=120,
         )
 
-    try:
-        resp = _call(use_json_mode=True)
-        # 个别模型/网关不支持 response_format 时降级为普通模式重试一次
-        if resp.status_code == 400 and "response_format" in resp.text:
-            resp = _call(use_json_mode=False)
-    except requests.exceptions.RequestException as e:
-        return [], f"网络请求失败：{e}"
-
-    if resp.status_code != 200:
+    all_evaluations = []
+    for i in range(0, len(students), batch_size):
+        chunk = students[i:i + batch_size]
+        chunk_prompt = _build_prompt(chunk, fields, previous_evals, custom_style, achievement)
         try:
-            err_msg = resp.json().get("error", {}).get("message", resp.text)
-        except Exception:
-            err_msg = resp.text
-        return [], f"API 返回错误({resp.status_code})：{err_msg}"
+            resp = _call(chunk_prompt, use_json_mode=True)
+            # 个别模型/网关不支持 response_format 时降级为普通模式重试一次
+            if resp.status_code == 400 and "response_format" in resp.text:
+                resp = _call(chunk_prompt, use_json_mode=False)
+        except requests.exceptions.RequestException as e:
+            return [], f"网络请求失败：{e}"
 
-    try:
-        content = resp.json()["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
-        return [], "API 返回格式异常，无法解析评价"
+        if resp.status_code != 200:
+            try:
+                err_msg = resp.json().get("error", {}).get("message", resp.text)
+            except Exception:
+                err_msg = resp.text
+            return [], f"API 返回错误({resp.status_code})：{err_msg}"
 
-    evaluations = _parse_evaluations(content, students)
-    if not evaluations:
-        return [], "未能从返回内容中解析出学生评价，请重试"
-    return evaluations, None
+        try:
+            content = resp.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            return [], "API 返回格式异常，无法解析评价"
+
+        evaluations = _parse_evaluations(content, chunk)
+        if not evaluations:
+            return [], "未能从返回内容中解析出学生评价，请重试"
+        all_evaluations.extend(evaluations)
+    return all_evaluations, None
 
 
 def list_models():

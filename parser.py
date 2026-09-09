@@ -229,6 +229,9 @@ def parse_upload(filename, filebytes):
     if missing:
         raise ValueError(f"缺少必要列: {', '.join(missing)}；需要: {', '.join(EXPECTED_COLS)}")
 
+    # 课节名规范化：剥掉导出系统前缀（如 "U260724-3A1-xxx - P9-递推算法（二）" → "P9-递推算法（二）"）
+    df["课节名称"] = df["课节名称"].map(canonical_lesson)
+
     # 过滤掉学生姓名为空的行：用布尔条件给 DataFrame 做行筛选。
     df = df[df["学生姓名"].notna() & (df["学生姓名"].astype(str).str.strip() != "")]
 
@@ -361,7 +364,7 @@ def parse_achievement(filebytes, filename=""):
     if df.empty:
         raise ValueError("逐题明细中没有学生数据")
 
-    lesson_name = str(df.iloc[0]["课节名称"]).strip()
+    lesson_name = canonical_lesson(df.iloc[0]["课节名称"])
     lesson_time = normalize_time(df.iloc[0]["开课时间"])
     lessons = {str(v).strip() for v in df["课节名称"].dropna()}
     if len(lessons) > 1:
@@ -418,23 +421,54 @@ def parse_achievement(filebytes, filename=""):
 
 # ---------------- 评价用：最后一节课的逐学生数据 ----------------
 
+# 课节名可能带导出系统前缀，如 "U260724-3A1-小吉老师70900 - P9-递推算法（二）"
+_LESSON_PREFIX_RE = re.compile(r"^\S.*?\s-\s+(P\d+-\S+)$")
+
+
+def canonical_lesson(name):
+    """提取课节规范名：剥掉 "xxx - P9-递推算法（二）" 里的系统前缀。
+
+    只在「前缀 + ' - ' + P编号课节」结构齐备时才剥，其余原样返回，
+    避免 "先导课"、"P1-补码之美" 这类名字被误伤。
+    """
+    s = str(name or "").strip()
+    m = _LESSON_PREFIX_RE.match(s)
+    return m.group(1) if m else s
+
+
 def last_lesson_summary(records):
-    """取班级最后一节课（按开课时间）的逐学生数据，评价只依据该节课。
+    """取班级最后一节课的逐学生数据，评价只依据该节课。
+
+    按课节规范名（canonical_lesson）分组，组内最大开课时间作为该课节时间，
+    取时间最大的课节——避免同一节课因前缀不同被拆组，或补课时间更晚导致漏人。
+    全部缺时间时按记录出现顺序取最后一组。
 
     返回 (lesson_name, lesson_time, students)；students 每项含
     学生姓名 / 课中正确率(得分率 0-1) / 正确数 / 奖杯数 / 有记录。
     """
     if not records:
         return "", "", []
+    groups, order = {}, []
+    for r in records:
+        name = canonical_lesson(r.get("课节名称"))
+        if not name:
+            continue
+        if name not in groups:
+            groups[name] = []
+            order.append(name)
+        groups[name].append(r)
+    if not order:
+        return "", "", []
 
-    def _t(r):
-        return str(r.get("开课时间") or "")
+    def _group_time(name):
+        return max(str(r.get("开课时间") or "") for r in groups[name])
 
-    last_time = max(_t(r) for r in records)
-    rows = [r for r in records if _t(r) == last_time] if last_time else records
-    lesson_name = str(rows[0].get("课节名称", "")).strip()
+    timed = [n for n in order if _group_time(n)]
+    last_name = max(timed, key=_group_time) if timed else order[-1]
+    lesson_time = _group_time(last_name)
+
     students = []
-    for r in rows:
+    for r in groups[last_name]:
         name = str(r.get("学生姓名", "")).strip()
         if not name:
             continue
@@ -447,7 +481,7 @@ def last_lesson_summary(records):
                 "有记录": True,
             }
         )
-    return lesson_name, last_time, students
+    return last_name, lesson_time, students
 
 
 # ---------------- 合并 ----------------
