@@ -613,19 +613,27 @@ def save_question_template(lesson_name, question_key, template):
     conn.close()
 
 
-def get_achievement_for_students(names):
-    """查询一组学生最新一次课测的逐题情况（评价生成用）。
+def get_achievement_for_students(names, lesson_name=None):
+    """查询一组学生某次课测的逐题情况（评价生成用）。
+
+    lesson_name 为 None 时取每位学生最近一次课节（按 lesson_time）；
+    指定 lesson_name 时只用该课节的数据。
 
     返回 {学生姓名: {lesson_name, lesson_time, score_rate, correct_count,
                      wrongs: [{question_key, stem, correct_option, knowledge_point,
                                choice, reply_template}]}}
-    只取该生最近课节（按 lesson_time）；wrongs 只含答错题，choice 来自错题清单
-    中该生的选择（无记录为空串），reply_template 为用户配置的讲评模板（可为空）。
+    wrongs 只含答错题，choice 来自错题清单中该生的选择（无记录为空串），
+    reply_template 为用户配置的讲评模板（可为空）。
     """
     if not names:
         return {}
     conn = get_conn()
     marks = ",".join("?" for _ in names)
+    where = f"a.student_name IN ({marks})"
+    params = list(names)
+    if lesson_name:
+        where += " AND a.lesson_name = ?"
+        params.append(lesson_name)
     rows = conn.execute(
         f"""SELECT a.student_name, a.lesson_name, a.lesson_time, a.result,
                    a.score_rate, a.correct_count, a.question_key,
@@ -634,9 +642,9 @@ def get_achievement_for_students(names):
             FROM achievement_results a
             LEFT JOIN question_templates t
               ON t.lesson_name = a.lesson_name AND t.question_key = a.question_key
-            WHERE a.student_name IN ({marks})
+            WHERE {where}
             ORDER BY a.lesson_time DESC, a.question_key""",
-        tuple(names),
+        tuple(params),
     ).fetchall()
     conn.close()
 

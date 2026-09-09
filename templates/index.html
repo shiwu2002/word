@@ -378,7 +378,7 @@
   <section class="tab-panel" id="tab-eval">
     <div class="card">
       <div class="card-head">
-        <h2>学生评价 <span class="muted small">选择依据字段，AI 自动生成每位学生的评语</span></h2>
+        <h2>学生评价 <span class="muted small">按本班最后一节课的数据，以家长视角 AI 生成每位学生的评语</span></h2>
       </div>
 
       {% if not api_key_configured %}
@@ -386,19 +386,24 @@
       {% endif %}
 
       <form method="post" action="{{ url_for('classes_evaluate', cid=current_class.id) }}" class="eval-form">
-        <p class="muted">选择评价依据的字段（可多选）：</p>
-        <div class="field-checkboxes">
-          {% for f in summary_fields %}
-          <label class="checkbox-label">
-            <input type="checkbox" name="fields" value="{{ f.key }}" checked> {{ f.label }}
-          </label>
-          {% endfor %}
-        </div>
+        <p class="muted">评价依据（固定）：本班<strong>最后一节课</strong>的 <strong>课中正确率、正确数、奖杯数</strong>，以及课测的<strong>课堂小测 / 课后作业</strong>错题与讲评模板。</p>
+        {% if achievement_lessons %}
         <div class="custom-style-group">
-          <label for="custom_style" class="muted">自定义评价语（可选）：</label>
+          <label for="achievement_lesson" class="muted">课测数据来源（可选）：</label>
+          <select name="achievement_lesson" id="achievement_lesson">
+            <option value="">最近一次课测（默认）</option>
+            {% for l in achievement_lessons %}
+            <option value="{{ l.lesson_name }}">{{ l.lesson_name }}（{{ l.lesson_time[:10] }}）</option>
+            {% endfor %}
+          </select>
+          <span class="muted hint">选择用哪一次课测的逐题答题情况生成评语；留空则默认取每位学生最近一次课测。</span>
+        </div>
+        {% endif %}
+        <div class="custom-style-group">
+          <label for="custom_style" class="muted">自定义评价模板（可选）：</label>
           <textarea name="custom_style" id="custom_style" rows="3"
-            placeholder="在此输入评价语范例或风格要求，AI 将模仿其语气和风格生成评价。如：&#10;昊萌同学在本阶段课堂表现积极，正确率稳步提升，继续保持你的学习热情！建议课后多巩固错题，争取下次正确数更高。"></textarea>
-          <span class="muted hint">留空则使用默认风格。填写后 AI 会模仿其语气、句式、措辞来生成每位学生的评价。</span>
+            placeholder="在此粘贴一条完整的家长消息范文，AI 将套用其结构生成每位学生的评价。姓名请用占位符（如 XX），生成时会自动替换成对应学生姓名。如：&#10;XX妈妈/爸爸，XX上周的课程内容结束啦，这边也跟您同步一下孩子上周的课程学习情况～……"></textarea>
+          <span class="muted hint">留空则使用默认的家长消息风格。填写后 AI 按范文结构生成，占位符（XX）会替换成每位学生姓名。</span>
         </div>
         <button class="btn btn-primary" type="submit"
                 {% if not api_key_configured %}disabled{% endif %}
@@ -425,7 +430,7 @@
         {% for batch in history_evaluations[1:] %}
         <div class="eval-batch">
           <h4>{{ batch.batch_time }}</h4>
-          {% for item in batch.items %}
+          {% for item in batch['items'] %}
           <div class="eval-item eval-item-hist">
             <div class="eval-name">{{ item.student_name }}</div>
             <div class="eval-text">{{ item.evaluation }}</div>

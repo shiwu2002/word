@@ -27,6 +27,8 @@ except ImportError:
 
 def _format_value(field, val):
     """格式化单个字段值用于 prompt 展示。"""
+    if field == "课中正确率":
+        return f"{val * 100:.1f}%"
     if field == "平均得分率":
         return f"{val * 100:.1f}%"
     return str(val)
@@ -87,11 +89,39 @@ def _build_prompt(summary, fields, previous_evals=None, custom_style="", achieve
         lines.append(line)
 
     students_text = "\n".join(lines)
+    template_rule = ""
+    if has_template:
+        template_rule = (
+            "6. 若学生带有「讲评模板」，评价中必须围绕该模板的讲解思路展开："
+            "点出错因、结合正确答案说明该知识点，并给出鼓励；没有讲评模板的错题只需简要提及\n"
+        )
     style_hint = ""
     if custom_style:
         style_hint = (
-            f"\n参考评价风格：\n{custom_style}\n\n"
-            f"请模仿以上评价的语气、句式、措辞风格来生成每位学生的评价，但数据部分要根据每位学生的实际情况填写。\n\n"
+            "参考评价模板（以下是一位学生「柯含」的完整范文，所有学生的评价都必须套用这个结构逐段生成）：\n"
+            f"{custom_style}\n\n"
+        )
+        requirements = (
+            "要求：\n"
+            "1. 每位学生的评价必须严格套用「参考评价模板」的结构：段落顺序、开头称呼"
+            "（如 XX妈妈/爸爸）、表情符号、结尾风格都与模板一致，总长度与模板相当\n"
+            "2. 模板中的课程内容段落（本周学了什么、课中练习了哪些题型等）是班级共性的，"
+            "原样保留不要改写；学生个人表现部分（到课情况、课中正确率、作业完成情况等）"
+            "用该学生的真实数据替换\n"
+            "3. 模板中的姓名占位符（如 XX、{姓名}、{学生姓名}、柯含 等出现的每一处）"
+            "一律替换成当前学生的真实姓名；其余共用内容保持不变\n"
+            "4. 基于该学生的数据给出具体、有针对性的评价，语气鼓励、积极向上\n"
+            "5. 如有历史评价，请参考并体现学生的进步与变化\n"
+        )
+    else:
+        requirements = (
+            "要求：\n"
+            "1. 每个学生一段评价，50-100字\n"
+            "2. 以发给家长的视角撰写：开头用「XX妈妈/爸爸」（XX 为学生姓名），"
+            "向家长同步孩子本节课的课堂表现，语气亲切自然\n"
+            "3. 基于选定数据给出具体、有针对性的评价，先肯定优点再给改进建议\n"
+            "4. 不要使用「XX同学」这类称呼，正文中用「孩子」或学生姓名指代\n"
+            "5. 如有历史评价，请参考并体现学生的进步与变化\n"
         )
     template_rule = ""
     if has_template:
@@ -99,17 +129,17 @@ def _build_prompt(summary, fields, previous_evals=None, custom_style="", achieve
             "6. 若学生带有「讲评模板」，评价中必须围绕该模板的讲解思路展开："
             "点出错因、结合正确答案说明该知识点，并给出鼓励；没有讲评模板的错题只需简要提及\n"
         )
+    opening = (
+        "请参照「参考评价模板」的结构，结合每位学生的课堂表现数据，为每个学生生成一条评价消息。"
+        if custom_style
+        else "你是一位经验丰富的教师，请根据以下学生的课堂表现数据，为每个学生写一段简短的评价。"
+    )
     return (
-        f"你是一位经验丰富的教师，请根据以下学生的课堂表现数据，为每个学生写一段简短的评价。\n\n"
+        f"{opening}\n\n"
         f"评价依据字段：{field_labels}\n\n"
         f"学生数据：\n{students_text}\n\n"
         f"{style_hint}"
-        f"要求：\n"
-        f"1. 每个学生一段评价，50-100字\n"
-        f"2. 基于选定字段的数据给出具体、有针对性的评价\n"
-        f"3. 语气鼓励、积极向上，先肯定优点再给改进建议\n"
-        f"4. 评价中必须用「XX同学」称呼学生，如「昊萌同学」，不要只写姓名\n"
-        f"5. 如有历史评价，请参考并体现学生的进步与变化\n"
+        f"{requirements}"
         f"{template_rule}\n"
         f"请严格按以下 JSON 数据结构输出，students 数组必须包含上面列出的每一位学生：\n"
         f'{{"students": [{{"name": "学生姓名", "evaluation": "该学生的评价内容"}}, ...]}}\n'
@@ -156,7 +186,7 @@ def generate_evaluations(summary, fields, api_key, previous_evals=None, custom_s
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.7,
-            "max_tokens": 4096,
+            "max_tokens": 8192 if custom_style else 4096,
         }
         if use_json_mode:
             body["response_format"] = {"type": "json_object"}  # DeepSeek 的 JSON 输出模式

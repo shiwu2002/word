@@ -29,13 +29,13 @@ from datastore import (
     save_evaluations, get_evaluations,
     get_previous_evals_by_student, get_history_evaluations,
     save_achievement, get_achievement_questions, save_question_template,
-    get_achievement_for_students,
+    get_achievement_for_students, list_achievement_lessons,
 )
 from parser import (
     parse_upload, parse_roster, aggregate_for_class,
     export_excel, progress_for_class, rankings_for_class,
     cross_class_rankings, session_owners, annotate_makeup, EXPECTED_COLS,
-    parse_achievement,
+    parse_achievement, last_lesson_summary,
 )
 from integration import route_merge_lessons
 from config import SUMMARY_FIELDS
@@ -87,6 +87,7 @@ def index():
     records, version_info, versions, summary, roster = [], None, [], [], []
     evaluations, history_evaluations = [], []
     achievement_questions = []
+    achievement_lessons = []
     progress, selected_student = {"rows": [], "class_sessions": []}, ""
     rankings = {"lessons": []}
     # 先取所有正式班（排除「默认名单」）的当前记录：既用于跨班对比，也用于判定补课归属
@@ -116,6 +117,7 @@ def index():
         evaluations = get_evaluations(cid)              # 最新一批评价
         history_evaluations = get_history_evaluations(cid)  # 全部历史评价（按批次）
         achievement_questions = get_achievement_questions()  # 课测题目与讲评模板
+        achievement_lessons = list_achievement_lessons()    # 课测课节列表（评价数据来源选择）
 
     return render_template(
         "index.html",
@@ -133,6 +135,7 @@ def index():
         evaluations=evaluations,
         history_evaluations=history_evaluations,
         achievement_questions=achievement_questions,
+        achievement_lessons=achievement_lessons,
         summary_fields=SUMMARY_FIELDS,
         api_key_configured=bool(get_api_key()),
     )
@@ -389,7 +392,7 @@ def api_models():
 
 @app.route("/classes/<int:cid>/evaluate", methods=["POST"])
 def classes_evaluate(cid):
-    """根据用户选定的字段，调用 LLM 为每个学生生成评价。"""
+    """根据最后一节课的数据，调用 LLM 为每个学生生成评价（家长视角）。"""
     cls = get_class(cid)
     if not cls:
         flash("班级不存在", "error")
@@ -400,22 +403,24 @@ def classes_evaluate(cid):
         flash("请先在「设置」中配置 DeepSeek API key", "error")
         return redirect(url_for("index", class_id=cid))
 
-    # 收集用户选定的依据字段
-    fields = request.form.getlist("fields")
-    if not fields:
-        flash("请至少选择一个依据字段", "error")
-        return redirect(url_for("index", class_id=cid))
-
-    # 获取汇总数据
+    # 评价参数固定为最后一节课的：课中正确率、正确数、奖杯数
     records, _ = get_current_records(cid)
     roster = get_roster(cid)
-    summary = aggregate_for_class(records, roster)
+    lesson_name, lesson_time, summary = last_lesson_summary(records)
+    if not summary:
+        flash("该班级没有课时记录，无法生成评价", "error")
+        return redirect(url_for("index", class_id=cid))
+    fields = ["课中正确率", "正确数", "奖杯数"]
 
     # 获取历史评价，供 LLM 综合参考
     previous_evals = get_previous_evals_by_student(cid)
     custom_style = request.form.get("custom_style", "").strip()
-    # 课测逐题数据（答错题目 + 用户配置的讲评模板），按班级名单学生过滤
-    achievement = get_achievement_for_students([s["学生姓名"] for s in summary])
+    # 课测逐题数据（答错题目 + 用户配置的讲评模板），按班级名单学生过滤；
+    # 用户可选定某次课节（留空则默认取每位学生最近一次）
+    achievement_lesson = request.form.get("achievement_lesson", "").strip()
+    achievement = get_achievement_for_students(
+        [s["学生姓名"] for s in summary], lesson_name=achievement_lesson or None
+    )
     evaluations, error = generate_evaluations(
         summary, fields, api_key, previous_evals, custom_style, achievement
     )
@@ -425,7 +430,13 @@ def classes_evaluate(cid):
 
     fields_used = fields + (["错题讲评模板"] if achievement else [])
     save_evaluations(cid, evaluations, fields_used)
-    flash(f"已为 {len(evaluations)} 名学生生成评价（依据：{'、'.join(fields)}）", "success")
+    msg = f"已为 {len(evaluations)} 名学生生成评价（依据{'、'.join(fields)}"
+    if lesson_name:
+        msg += f"；最后一节课：{lesson_name}"
+    if achievement_lesson:
+        msg += f"；课测：{achievement_lesson.split(' - ')[-1]}"
+    msg += "）"
+    flash(msg, "success")
     return redirect(url_for("index", class_id=cid))
 
 

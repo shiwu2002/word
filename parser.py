@@ -416,6 +416,40 @@ def parse_achievement(filebytes, filename=""):
     }
 
 
+# ---------------- 评价用：最后一节课的逐学生数据 ----------------
+
+def last_lesson_summary(records):
+    """取班级最后一节课（按开课时间）的逐学生数据，评价只依据该节课。
+
+    返回 (lesson_name, lesson_time, students)；students 每项含
+    学生姓名 / 课中正确率(得分率 0-1) / 正确数 / 奖杯数 / 有记录。
+    """
+    if not records:
+        return "", "", []
+
+    def _t(r):
+        return str(r.get("开课时间") or "")
+
+    last_time = max(_t(r) for r in records)
+    rows = [r for r in records if _t(r) == last_time] if last_time else records
+    lesson_name = str(rows[0].get("课节名称", "")).strip()
+    students = []
+    for r in rows:
+        name = str(r.get("学生姓名", "")).strip()
+        if not name:
+            continue
+        students.append(
+            {
+                "学生姓名": name,
+                "课中正确率": parse_accuracy(r.get("得分率", 0)),
+                "正确数": int(safe_num(r.get("正确数", 0))),
+                "奖杯数": int(safe_num(r.get("奖杯数", 0))),
+                "有记录": True,
+            }
+        )
+    return lesson_name, last_time, students
+
+
 # ---------------- 合并 ----------------
 
 def merge_records(existing, new_rows):
