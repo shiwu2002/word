@@ -38,12 +38,23 @@ def get_conn():
     return conn
 
 
+def _ensure_writable(path):
+    """Windows 只读属性会让 SQLite 写入报 'attempt to write a readonly database'
+    （读、AI 生成都正常，最后保存时才失败）。启动时自动清除该属性，数据无损。"""
+    try:
+        if os.path.exists(path) and not os.access(path, os.W_OK):
+            os.chmod(path, 0o666)
+    except OSError:
+        pass  # 清不掉时让写入路径自行报错，不阻断启动
+
+
 def init_db():
     """初始化表结构（已存在则跳过，幂等）。
 
     students 表通过 FOREIGN KEY ... ON DELETE CASCADE 绑定 classes，
     删除班级时其名单与版本会自动级联删除。
     """
+    _ensure_writable(DB_PATH)
     conn = get_conn()
     conn.executescript(
         """

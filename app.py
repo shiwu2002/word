@@ -445,15 +445,18 @@ def classes_evaluate(cid):
     achievement = get_achievement_for_students(
         [s["学生姓名"] for s in summary], lesson_name=achievement_lesson or None
     )
-    evaluations, error = generate_evaluations(
-        summary, fields, api_key, previous_evals, custom_style, achievement
-    )
-    if error:
-        flash(f"评价生成失败：{error}", "error")
+    try:
+        evaluations, error = generate_evaluations(
+            summary, fields, api_key, previous_evals, custom_style, achievement
+        )
+        if error:
+            flash(f"评价生成失败：{error}", "error")
+            return redirect(url_for("index", class_id=cid))
+        fields_used = fields + (["错题讲评模板"] if achievement else [])
+        save_evaluations(cid, evaluations, fields_used)
+    except Exception as e:  # 兜底：任何异常（如数据库只读、磁盘满）都转为页面提示而非 500
+        flash(f"评价生成/保存失败：{e}", "error")
         return redirect(url_for("index", class_id=cid))
-
-    fields_used = fields + (["错题讲评模板"] if achievement else [])
-    save_evaluations(cid, evaluations, fields_used)
     msg = f"已为 {len(evaluations)} 名学生生成评价（依据{'、'.join(fields)}"
     if lesson_name:
         msg += f"；最后一节课：{lesson_name}"
