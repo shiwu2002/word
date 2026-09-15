@@ -425,6 +425,24 @@ def parse_achievement(filebytes, filename=""):
 _LESSON_PREFIX_RE = re.compile(r"^\S.*?\s-\s+(P\d+-\S+)$")
 
 
+def dedupe_lesson_records(records):
+    """同一学生同一课节只保留一行（合并到班级的同一课程）。
+
+    补课回归本班、或历史前缀重复导入会产生同课节多行：
+    进步曲线 / 汇总统计按「学生+规范课节名」去重，保留开课时间最新的一行
+    （与 last_lesson_summary、merge_records 的「新数据覆盖」原则一致）。
+    返回保持原有出现顺序的去重后记录列表。
+    """
+    best = {}
+    for i, r in enumerate(records):
+        key = (str(r.get("学生姓名") or "").strip(), canonical_lesson(r.get("课节名称")))
+        t = str(r.get("开课时间") or "")
+        prev = best.get(key)
+        if prev is None or str(prev[0].get("开课时间") or "") <= t:
+            best[key] = (r, i)
+    return [r for r, _ in sorted(best.values(), key=lambda x: x[1])]
+
+
 def canonical_lesson(name):
     """提取课节规范名：剥掉 "xxx - P9-递推算法（二）" 里的系统前缀。
 
@@ -468,10 +486,18 @@ def last_lesson_summary(records):
     lesson_time = _group_time(last_name)
 
     students = []
+    by_name = {}
     for r in groups[last_name]:
         name = str(r.get("学生姓名", "")).strip()
         if not name:
             continue
+        # 同一学生同组出现多行（如历史前缀重复导入）：保留开课时间最新的一行
+        prev = by_name.get(name)
+        if prev is not None and str(prev[0].get("开课时间") or "") > str(r.get("开课时间") or ""):
+            continue
+        if prev is not None:
+            students.pop(prev[1])
+        by_name[name] = (r, len(students))
         students.append(
             {
                 "学生姓名": name,
@@ -529,7 +555,8 @@ def aggregate_for_class(records, roster):
       按元组排序——先按“是否有记录”分组，再按总奖杯数降序；有记录的排在前面。
     """
     groups = defaultdict(list)  # {学生姓名: [该学生的所有记录]}
-    for r in records:
+    # 同课节多行（补课回归/重复导入）先合并，课节数/平均分不重复计数
+    for r in dedupe_lesson_records(records):
         groups[r["学生姓名"]].append(r)
 
     summary = []
@@ -570,6 +597,47 @@ def _mean(vals):
     return sum(vals) / len(vals) if vals else 0.0
 
 
+# ---------------- 班级数据导出（OJ 通过数） ----------------
+OJ_TOTAL = 2  # 课后作业 / 课后拓展 的 OJ 题总数（产品约定，写死）
+
+
+def parse_oj_export(data):
+    """解析「班级数据导出」表：每行一名学生，只取课后作业/课后拓展 OJ 通过数。
+
+    data 为文件路径或字节内容。返回 [{"姓名", "课程名称", "hw_passed", "ext_passed"}]，
+    通过数已按 OJ_TOTAL 截断。
+    """
+    df = pd.read_excel(io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else data, sheet_name=0)
+    df.columns = [str(c).strip() for c in df.columns]
+    if "姓名" not in df.columns:
+        raise ValueError("缺少「姓名」列，请确认上传的是班级数据导出表")
+    students = []
+    for _, r in df.iterrows():
+        name = str(r.get("姓名") or "").strip()
+        if not name or name.lower() == "nan":
+            continue
+        lesson = canonical_lesson(str(r.get("课程名称") or "").strip())
+
+        def _passed(col):
+            try:
+                v = int(float(r.get(col, 0)))
+            except (TypeError, ValueError):
+                v = 0
+            return max(0, min(OJ_TOTAL, v))
+
+        students.append(
+            {
+                "姓名": name,
+                "课程名称": lesson,
+                "hw_passed": _passed("课后作业OJ题通过数"),
+                "ext_passed": _passed("课后拓展OJ题通过数"),
+            }
+        )
+    if not students:
+        raise ValueError("表中没有有效的学生行")
+    return students
+
+
 def progress_for_class(records, roster):
     """计算某班级的进步曲线数据（以名单为框架）。
 
@@ -582,6 +650,8 @@ def progress_for_class(records, roster):
                     low, high, is_improved}
       class_sessions: 班级各课节（含时间）的平均正确率，按时间排序。
     """
+    # 同课节多行（补课回归/重复导入）先合并，避免同一课程重复出现在曲线上
+    records = dedupe_lesson_records(records)
     groups = defaultdict(list)
     for r in records:
         groups[r["学生姓名"]].append(r)
@@ -591,7 +661,7 @@ def progress_for_class(records, roster):
         # 只保留画曲线需要的字段，减轻传给前端 JSON 的体积
         sess = sorted(
             [
-                {"课节名称": r["课节名称"], "开课时间": r["开课时间"], "得分率": r["得分率"]}
+                {"课节名称": canonical_lesson(r["课节名称"]), "开课时间": r["开课时间"], "得分率": r["得分率"]}
                 for r in groups.get(name, [])
             ],
             key=lambda s: s["开课时间"],
@@ -640,14 +710,22 @@ def progress_for_class(records, roster):
     rows.sort(key=lambda x: (x["n"] < 2, -x["delta"]))
 
     # 班级各课节平均正确率（帮助判断哪堂课整体偏难）
+    # 按规范课节名合并（不再按时间拆分）：补课学生的行并入班级同一课程，
+    # 时间取最早的正式课时间，人数统计包含补课行
     by_sess = defaultdict(list)
     for r in records:
-        by_sess[(r["课节名称"], r["开课时间"])].append(r["得分率"])
+        by_sess[canonical_lesson(r["课节名称"])].append(r["得分率"])
+    lesson_times = {}
+    for r in records:
+        k = canonical_lesson(r["课节名称"])
+        t = str(r.get("开课时间") or "")
+        if k not in lesson_times or (t and t < lesson_times[k]):
+            lesson_times[k] = t or lesson_times[k]
     class_sessions = sorted(
         [
             {
-                "课节名称": k[0],
-                "开课时间": k[1],
+                "课节名称": k,
+                "开课时间": lesson_times.get(k, ""),
                 "avg": round(_mean(v), 4),
                 "count": len(v),
             }

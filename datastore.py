@@ -14,6 +14,7 @@
 4. 回退 = 删除某班级最新版本，回到上一版本。
 """
 import os
+import re
 import sys
 import json
 import sqlite3
@@ -112,6 +113,19 @@ def init_db():
             reply_template TEXT DEFAULT '',
             updated_at     TEXT NOT NULL,
             UNIQUE (lesson_name, question_key)
+        );
+        """
+    )
+    # OJ 通过数（班级数据导出）：课后作业/课后拓展 OJ 通过数，总数在 parser.OJ_TOTAL 写死为 2
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS oj_results (
+            student_name TEXT NOT NULL,
+            lesson_name  TEXT NOT NULL,
+            hw_passed    INTEGER NOT NULL DEFAULT 0,  -- 课后作业OJ题通过数
+            ext_passed   INTEGER NOT NULL DEFAULT 0,  -- 课后拓展OJ题通过数
+            imported_at  TEXT NOT NULL,
+            UNIQUE (student_name, lesson_name)
         );
         """
     )
@@ -613,6 +627,63 @@ def save_question_template(lesson_name, question_key, template):
     conn.close()
 
 
+def save_oj_results(rows):
+    """保存 OJ 通过数（班级数据导出）。rows: parser.parse_oj_export 的返回值。
+
+    同一（学生，课节）重复导入覆盖；返回写入行数。
+    """
+    conn = get_conn()
+    now = _now()
+    conn.executemany(
+        """
+        INSERT INTO oj_results (student_name, lesson_name, hw_passed, ext_passed, imported_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (student_name, lesson_name)
+        DO UPDATE SET hw_passed = excluded.hw_passed,
+                      ext_passed = excluded.ext_passed,
+                      imported_at = excluded.imported_at
+        """,
+        [(r["姓名"], r["课程名称"], r["hw_passed"], r["ext_passed"], now) for r in rows],
+    )
+    conn.commit()
+    n = conn.total_changes
+    conn.close()
+    return n
+
+
+def get_oj_for_students(names):
+    """返回 {学生姓名: {lesson_name, hw_passed, ext_passed, hw_total, ext_total}}。
+
+    同一学生多条课节记录时取导入时间最新的一条；总数固定为 parser.OJ_TOTAL。
+    """
+    from parser import OJ_TOTAL
+
+    if not names:
+        return {}
+    conn = get_conn()
+    marks = ",".join("?" for _ in names)
+    rows = conn.execute(
+        f"""
+        SELECT student_name, lesson_name, hw_passed, ext_passed, imported_at
+        FROM oj_results
+        WHERE student_name IN ({marks})
+        ORDER BY imported_at ASC
+        """,
+        list(names),
+    ).fetchall()
+    conn.close()
+    out = {}
+    for r in rows:  # ASC 遍历，后写覆盖先写 → 留下最新导入
+        out[r["student_name"]] = {
+            "lesson_name": r["lesson_name"],
+            "hw_passed": r["hw_passed"],
+            "ext_passed": r["ext_passed"],
+            "hw_total": OJ_TOTAL,
+            "ext_total": OJ_TOTAL,
+        }
+    return out
+
+
 def get_achievement_for_students(names, lesson_name=None):
     """查询一组学生某次课测的逐题情况（评价生成用）。
 
@@ -646,7 +717,6 @@ def get_achievement_for_students(names, lesson_name=None):
             ORDER BY a.lesson_time DESC, a.question_key""",
         tuple(params),
     ).fetchall()
-    conn.close()
 
     result = {}
     for r in rows:
@@ -654,11 +724,12 @@ def get_achievement_for_students(names, lesson_name=None):
             r["student_name"],
             {"lesson_name": r["lesson_name"], "lesson_time": r["lesson_time"],
              "score_rate": r["score_rate"] or 0, "correct_count": r["correct_count"] or 0,
-             "wrongs": []},
+             "wrongs": [], "_answered": set()},
         )
         # 行已按 lesson_time 倒序：首次见到该学生即其最近课节，其后不同课节的行直接跳过
         if r["lesson_name"] != st["lesson_name"]:
             continue
+        st["_answered"].add(r["question_key"])
         if r["result"] != "错":
             continue
         choice = ""
@@ -676,4 +747,63 @@ def get_achievement_for_students(names, lesson_name=None):
                 "reply_template": r["reply_template"] or "",
             }
         )
+
+    # 未完成类别检测：该课节的题目（question_templates）中该生没有作答行的类别。
+    # 未作答的题目在 achievement_results 里没有行（解析时空白单元格不入库）。
+    if result:
+        lessons = {st["lesson_name"] for st in result.values()}
+        marks = ",".join("?" for _ in lessons)
+        qrows = conn.execute(
+            f"SELECT lesson_name, question_key, qtype FROM question_templates WHERE lesson_name IN ({marks})",
+            list(lessons),
+        ).fetchall()
+        lesson_qs = {}
+        for q in qrows:
+            lesson_qs.setdefault(q["lesson_name"], {})[q["question_key"]] = _clean_qtype(q["qtype"], q["question_key"])
+        for st in result.values():
+            expected = lesson_qs.get(st["lesson_name"], {})
+            missing = []
+            for qkey, cat in expected.items():
+                if qkey in st["_answered"] or cat in missing:
+                    continue
+                missing.append(cat)
+            # 课堂小测放最后提醒，作业类缺失在前
+            missing.sort(key=lambda c: c.startswith("课堂小测"))
+            st["missing"] = missing
+        for st in result.values():
+            st.pop("_answered", None)
+        # 合并 OJ 通过数（班级数据导出），评价生成时作为课后作业/拓展的真实参数
+        oj_all = get_oj_for_students(list(names))
+        for name, oj in oj_all.items():
+            st = result.get(name)
+            if st is None:
+                # 只有 OJ 数据、没有逐题作答记录的学生：生成桩条目，保证 OJ 参数可见
+                result[name] = {
+                    "lesson_name": oj.get("lesson_name", ""), "lesson_time": "",
+                    "score_rate": 0, "correct_count": 0, "wrongs": [],
+                    "missing": [], "oj": oj,
+                }
+                continue
+            st["oj"] = oj
+            # OJ 数据已覆盖课后作业/课后拓展：通过数=总数代表全部完成且正确，
+            # 逐题明细里没有对应行（无错题记录）属正常，不得按「未作答」误报提醒；
+            # 未全对时的提醒由 OJ 通过数行（📘）负责，避免重复
+            st["missing"] = [
+                c for c in st.get("missing", [])
+                if "作业" not in c and "拓展" not in c
+            ]
+    conn.close()
     return result
+
+
+def _clean_qtype(qtype, question_key):
+    """题目类别显示名：优先从题号前缀推断（课堂小测1→课堂小测），qtype 列兜底。
+
+    实际数据的 qtype 是「课堂答题/OJ编程」这类作答方式，与模板占位符
+    （{课后小测}/{课后OJ}）的类别语义不一致，故题号前缀优先。
+    """
+    m = re.match(r"^(\D+)", str(question_key or ""))
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    s = str(qtype or "").strip()
+    return s if s and s.lower() not in ("nan", "none") else "题目"

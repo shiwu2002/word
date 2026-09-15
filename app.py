@@ -29,13 +29,14 @@ from datastore import (
     save_evaluations, get_evaluations,
     get_previous_evals_by_student, get_history_evaluations,
     save_achievement, get_achievement_questions, save_question_template,
+    save_oj_results,
     get_achievement_for_students, list_achievement_lessons,
 )
 from parser import (
     parse_upload, parse_roster, aggregate_for_class,
     export_excel, progress_for_class, rankings_for_class,
     cross_class_rankings, session_owners, annotate_makeup, EXPECTED_COLS,
-    parse_achievement, last_lesson_summary,
+    parse_achievement, last_lesson_summary, parse_oj_export,
 )
 from integration import route_merge_lessons
 from config import SUMMARY_FIELDS
@@ -282,6 +283,29 @@ def achievement_template_save():
     return {"ok": True}
 
 
+@app.route("/oj/import", methods=["POST"])
+def oj_import():
+    """导入班级数据导出表：仅提取课后作业/课后拓展 OJ 通过数（总数写死 2）。"""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        flash("请选择班级数据导出文件", "error")
+        return redirect(url_for("index"))
+    try:
+        rows = parse_oj_export(f.read())
+    except ValueError as e:
+        flash(f"OJ 通过数解析失败：{e}", "error")
+        return redirect(url_for("index"))
+    save_oj_results(rows)
+    lessons = sorted({r["课程名称"] for r in rows if r["课程名称"]})
+    flash(
+        f"已导入 OJ 通过数：{len(rows)} 名学生"
+        f"（{'、'.join(lessons[:3])}{'等' if len(lessons) > 3 else ''}）— "
+        "课后作业/课后拓展 OJ 总数按 2 题计，生成评价时自动使用。",
+        "success",
+    )
+    return redirect(url_for("index"))
+
+
 # ---------------- 班级管理 ----------------
 
 @app.route("/classes/<int:cid>/rename", methods=["POST"])
@@ -403,14 +427,14 @@ def classes_evaluate(cid):
         flash("请先在「设置」中配置 DeepSeek API key", "error")
         return redirect(url_for("index", class_id=cid))
 
-    # 评价参数固定为最后一节课的：课中正确率、正确数、奖杯数
+    # 评价参数固定为最后一节课的：课中正确率、正确数（奖杯数不再作为素材）
     records, _ = get_current_records(cid)
     roster = get_roster(cid)
     lesson_name, lesson_time, summary = last_lesson_summary(records)
     if not summary:
         flash("该班级没有课时记录，无法生成评价", "error")
         return redirect(url_for("index", class_id=cid))
-    fields = ["课中正确率", "正确数", "奖杯数"]
+    fields = ["课中正确率", "正确数"]
 
     # 获取历史评价，供 LLM 综合参考
     previous_evals = get_previous_evals_by_student(cid)

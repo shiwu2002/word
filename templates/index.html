@@ -78,6 +78,17 @@
 
     <div class="card">
       <div class="card-head">
+        <h2>导入班级数据导出（OJ 通过数）</h2>
+      </div>
+      <p class="muted">上传<strong>班级数据导出 Excel</strong>：系统只提取每人的<strong>课后作业OJ题通过数</strong>和<strong>课后拓展OJ题通过数</strong>两个参数（总数按 2 题写死），用于学生评价中的 <code>{课后OJ}</code> 和 <code>{课后拓展}</code> 占位符。同一学生重复导入覆盖旧数据。</p>
+      <form method="post" action="{{ url_for('oj_import') }}" enctype="multipart/form-data" class="upload-form">
+        <input type="file" name="file" accept=".xlsx,.xls" required>
+        <button class="btn btn-primary" type="submit">导入 OJ 通过数</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2>班级管理
           <span class="muted small">创建于 {{ current_class.created_at }}</span>
         </h2>
@@ -400,10 +411,10 @@
         </div>
         {% endif %}
         <div class="custom-style-group">
-          <label for="custom_style" class="muted">自定义评价模板（可选）：</label>
+          <label for="custom_style" class="muted">自定义评价模板（可选，支持占位符）：</label>
           <textarea name="custom_style" id="custom_style" rows="3"
-            placeholder="在此粘贴一条完整的家长消息范文，AI 将套用其结构生成每位学生的评价。姓名请用占位符（如 XX），生成时会自动替换成对应学生姓名。如：&#10;XX妈妈/爸爸，XX上周的课程内容结束啦，这边也跟您同步一下孩子上周的课程学习情况～……"></textarea>
-          <span class="muted hint">留空则使用默认的家长消息风格。填写后 AI 按范文结构生成，占位符（XX）会替换成每位学生姓名。</span>
+            placeholder="模板文字会逐字保留，{占位符} 替换为每位学生的真实数据。系统锁定四个参数：{name} 名字（去姓）、{课中正确率} 数值、{课后小测}（全对→原文；有错题→替换为讲评模板内容）、{课后作业OJ和课后扩展OJ的完成情况}（完成/未完成+提醒）；其它 {占位符} 输出时会删除。如：&#10;{name}妈妈，{name}上周的课程内容结束啦……课中正确率{课中正确率}%，{课后小测}全部通过✅。作业方面，{课后作业OJ和课后扩展OJ的完成情况}，作业完成情况很好～"></textarea>
+          <span class="muted hint">留空则使用默认的家长消息风格。模板中的换行会原样保留；正确率低于 70% 时自动不提供该数据，由 AI 改写为鼓励性表述。</span>
         </div>
         <button class="btn btn-primary" type="submit"
                 {% if not api_key_configured %}disabled{% endif %}

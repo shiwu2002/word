@@ -244,7 +244,7 @@ input[type=password] {
 .eval-name {
   flex-shrink: 0; width: 80px; font-weight: 600; color: var(--primary-dark);
 }
-.eval-text { flex: 1; line-height: 1.7; color: var(--text); }
+.eval-text { flex: 1; line-height: 1.7; color: var(--text); white-space: pre-wrap; }
 
 /* 历史评价折叠 */
 .eval-history { margin-top: 16px; }
