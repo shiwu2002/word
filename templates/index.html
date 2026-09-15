@@ -176,7 +176,8 @@
           <thead>
             <tr>
               <th>课节名称</th><th>开课时间</th><th>学生姓名</th>
-              <th>正确数</th><th>得分率</th><th>奖杯数</th><th>出勤总奖杯数</th><th>备注</th>
+              <th>正确数</th><th>得分率</th><th>奖杯数</th><th>出勤总奖杯数</th>
+              <th>课堂小测</th><th>课后作业OJ</th><th>课后拓展OJ</th><th>备注</th>
             </tr>
           </thead>
           <tbody>
@@ -189,6 +190,9 @@
               <td>{{ '%.0f' % (r['得分率']*100) }}%</td>
               <td>{{ r['奖杯数'] }}</td>
               <td>{{ r['出勤总奖杯数'] }}</td>
+              <td>{% if r.get('课堂小测') %}<span class="tag {{ 'tag-green' if r['课堂小测'].ok else 'tag-makeup' }}">{{ r['课堂小测'].text }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td>{% if r.get('课后作业OJ') %}<span class="tag {{ 'tag-green' if r['课后作业OJ'].ok else 'tag-makeup' }}">{{ r['课后作业OJ'].text }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td>{% if r.get('课后拓展OJ') %}<span class="tag {{ 'tag-green' if r['课后拓展OJ'].ok else 'tag-makeup' }}">{{ r['课后拓展OJ'].text }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
               <td>{% if r.get('补课') %}<span class="tag tag-makeup">补课</span>{% else %}<span class="muted">—</span>{% endif %}</td>
             </tr>
             {% endfor %}
@@ -461,7 +465,7 @@
     <div class="card">
       <div class="card-head">
         <h2>错题讲评模板
-          <span class="muted small">为每道课测题配置答错时的讲评要点，生成评价时 AI 会把答错学生该题的模板一并纳入总结</span>
+          <span class="muted small">为每道课测题配置答错时的讲评要点，生成评价时 AI 会把答错学生该题的模板一并纳入总结；课后作业OJ / 课后拓展OJ 未交提醒模板也在此配置（同一套模板，对应 {课后作业OJ} / {课后拓展OJ} 两个占位参数）</span>
         </h2>
       </div>
       {% for lesson in achievement_questions %}
@@ -470,6 +474,25 @@
           <span class="muted small">{{ lesson.lesson_time[:10] }}</span>
         </h3>
         {% for q in lesson.questions %}
+        {% if q.is_oj %}
+        <div class="qtpl" data-lesson="{{ lesson.lesson_name }}" data-qkey="{{ q.question_key }}">
+          <div class="qtpl-head">
+            <span class="tag tag-makeup">{{ q.question_key }}</span>
+            <span class="qtpl-stem">{{ q.stem }}</span>
+          </div>
+          <div class="qtpl-meta">
+            {% if q.wrong_students %}
+            <span class="muted small">未交 {{ q.wrong_students|length }} 人：</span>
+            {% for w in q.wrong_students %}<span class="chip chip-wrong">{{ w.name }}</span>{% endfor %}
+            {% else %}<span class="muted small">本班暂无未交学生（模板已配置，可继续编辑）</span>{% endif %}
+          </div>
+          <div class="qtpl-edit">
+            <textarea class="qtpl-text" rows="2" placeholder="{% if q.question_key == '课后作业OJ' %}未交时的提醒模板（留空则用默认提醒）：如「该生课后作业OJ尚未提交，辛苦家长督促孩子本周内完成，巩固本讲知识点」{% else %}未交时的提醒模板（留空则用默认提醒）：如「该生课后拓展OJ尚未完成，建议家长督促孩子尽快补上，拓展题对思维提升很有帮助」{% endif %}">{{ q.reply_template }}</textarea>
+            <button type="button" class="btn btn-small qtpl-save">保存模板</button>
+            <span class="qtpl-status muted small"></span>
+          </div>
+        </div>
+        {% else %}
         <div class="qtpl" data-lesson="{{ lesson.lesson_name }}" data-qkey="{{ q.question_key }}">
           <div class="qtpl-head">
             <span class="tag {% if '课后' in q.question_key %}tag-makeup{% else %}tag-green{% endif %}">{{ q.question_key }}</span>
@@ -488,6 +511,7 @@
             <span class="qtpl-status muted small"></span>
           </div>
         </div>
+        {% endif %}
         {% endfor %}
       </div>
       {% endfor %}

@@ -145,8 +145,36 @@ def init_db():
         conn.execute("ALTER TABLE evaluations ADD COLUMN batch_id INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # 列已存在
+    _normalize_lesson_names(conn)
     conn.commit()
     conn.close()
+
+
+def _normalize_lesson_names(conn):
+    """一次性清洗历史数据：课测/错题模板/OJ 表里旧版导入的长课节名统一为规范名。
+
+    新版导入在解析时已规范化（parse_upload / parse_achievement / parse_oj_export），
+    这里只处理旧版本代码入库的「U260724-xxx - P9-递推算法（二）」式长名——
+    不清洗的话，明细记录/进步曲线等按「学生+课节名」匹配时会与课时数据对不上。
+    目标规范名已存在（新旧数据并存）时跳过该条，避免撞 UNIQUE 约束。
+    """
+    from parser import canonical_lesson
+
+    for table in ("achievement_results", "question_templates", "oj_results"):
+        rows = conn.execute(f"SELECT DISTINCT lesson_name FROM {table}").fetchall()
+        for r in rows:
+            name = r["lesson_name"]
+            canon = canonical_lesson(name)
+            if not canon or canon == name:
+                continue
+            dup = conn.execute(
+                f"SELECT COUNT(*) n FROM {table} WHERE lesson_name=?", (canon,)
+            ).fetchone()["n"]
+            if dup:
+                continue  # 规范名已有数据（新版导入），保留现状不动旧行
+            conn.execute(
+                f"UPDATE {table} SET lesson_name=? WHERE lesson_name=?", (canon, name)
+            )
 
 
 def _now():
@@ -604,7 +632,14 @@ def get_achievement_questions(class_id=None):
     过滤后无本班学生且未配模板的题目不再展示。
     返回 [{lesson_name, lesson_time, questions: [...]}]，question 含
     reply_template 与 wrong_students（已解析成 [{name, choice}]）。
+
+    课后作业OJ / 课后拓展OJ 的未交提醒模板与错题讲评模板同表存储
+    （question_templates，question_key = 课后作业OJ / 课后拓展OJ），
+    在每个课节下作为两个独立条目返回，附该班未交学生名单（oj_results 中
+    通过数 < 总数）。「未交」与「未完成」同义：OJ 只有完成与未完成两种状态。
     """
+    from parser import OJ_TOTAL
+
     conn = get_conn()
     roster = None
     if class_id:
@@ -617,11 +652,60 @@ def get_achievement_questions(class_id=None):
            FROM question_templates t
            LEFT JOIN achievement_results a
              ON a.lesson_name = t.lesson_name AND a.question_key = t.question_key
+           WHERE t.question_key NOT IN ('课后作业OJ', '课后拓展OJ')
            GROUP BY t.id
            ORDER BY lesson_time DESC, t.question_key"""
     ).fetchall()
+    trows = conn.execute(
+        "SELECT lesson_name, question_key, reply_template FROM question_templates "
+        "WHERE question_key IN ('课后作业OJ', '课后拓展OJ')"
+    ).fetchall()
+    ojrows = conn.execute(
+        "SELECT student_name, lesson_name, hw_passed, ext_passed FROM oj_results"
+    ).fetchall()
     conn.close()
+
+    oj_tpl = {}  # 课节 → {question_key: 未交提醒模板}
+    for t in trows:
+        oj_tpl.setdefault(t["lesson_name"], {})[t["question_key"]] = t["reply_template"] or ""
+
+    # 各课节的 OJ 未交名单（仅统计本班学生）
+    oj_missing = {}  # 课节 → {"课后作业OJ": [姓名...], "课后拓展OJ": [姓名...]}
+    for r in ojrows:
+        if roster is not None and r["student_name"] not in roster:
+            continue
+        d = oj_missing.setdefault(r["lesson_name"], {"课后作业OJ": [], "课后拓展OJ": []})
+        if r["hw_passed"] < OJ_TOTAL:
+            d["课后作业OJ"].append(r["student_name"])
+        if r["ext_passed"] < OJ_TOTAL:
+            d["课后拓展OJ"].append(r["student_name"])
+
+    def _oj_question(lesson_name, qkey):
+        """单个 OJ 未交提醒条目；本班无未交且未配模板时返回 None（减少干扰）。"""
+        miss = oj_missing.get(lesson_name, {}).get(qkey, [])
+        tpl = oj_tpl.get(lesson_name, {}).get(qkey, "")
+        if not miss and not tpl.strip():
+            return None
+        return {
+            "question_key": qkey,
+            "stem": "OJ 未交提醒模板（未交学生的评价中使用）",
+            "correct_option": "",
+            "knowledge_point": "",
+            "wrong_students": [{"name": n, "choice": ""} for n in miss],
+            "reply_template": tpl,
+            "is_oj": True,
+        }
+
     lessons, lesson_map = [], {}
+
+    def _lesson(name, lesson_time=""):
+        lesson = lesson_map.get(name)
+        if not lesson:
+            lesson = {"lesson_name": name, "lesson_time": lesson_time, "questions": []}
+            lesson_map[name] = lesson
+            lessons.append(lesson)
+        return lesson
+
     for r in rows:
         q = dict(r)
         wrong = json.loads(q["wrong_students"] or "[]")
@@ -630,23 +714,38 @@ def get_achievement_questions(class_id=None):
             if not wrong and not (q["reply_template"] or "").strip():
                 continue  # 与本班无关且未配模板的题目不展示
         q["wrong_students"] = wrong
-        lesson = lesson_map.get(q["lesson_name"])
-        if not lesson:
-            lesson = {"lesson_name": q["lesson_name"], "lesson_time": q["lesson_time"], "questions": []}
-            lesson_map[q["lesson_name"]] = lesson
-            lessons.append(lesson)
-        lesson["questions"].append(q)
+        _lesson(q["lesson_name"], q["lesson_time"])["questions"].append(q)
+
+    # OJ 条目挂在对应课节组末尾；只有 OJ 数据/模板、没有错题的课节单独成组
+    for name in sorted(set(oj_missing) | set(oj_tpl)):
+        lesson = lesson_map.get(name)
+        for qkey in ("课后作业OJ", "课后拓展OJ"):
+            q = _oj_question(name, qkey)
+            if q:
+                if lesson is None:
+                    lesson = _lesson(name)
+                lesson["questions"].append(q)
     return lessons
 
 
 def save_question_template(lesson_name, question_key, template):
-    """保存某课节某题的错题讲评模板（不存在该题记录则忽略）。"""
+    """保存某课节某题的错题讲评模板。
+
+    该课节该题尚无记录时（如课后作业OJ / 课后拓展OJ 的未交提醒模板，OJ 数据
+    不走课堂成就导入、question_templates 里原本没有行）创建占位行，保证模板可保存。
+    """
     conn = get_conn()
-    conn.execute(
+    cur = conn.execute(
         "UPDATE question_templates SET reply_template=?, updated_at=? "
         "WHERE lesson_name=? AND question_key=?",
         (template, _now(), lesson_name, question_key),
     )
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT INTO question_templates (lesson_name, question_key, reply_template, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (lesson_name, question_key, template, _now()),
+        )
     conn.commit()
     conn.close()
 
@@ -706,6 +805,58 @@ def get_oj_for_students(names):
             "ext_total": OJ_TOTAL,
         }
     return out
+
+
+def get_oj_map_for_rows(names):
+    """返回 {(学生姓名, 课节名称): {hw_passed, hw_total, ext_passed, ext_total}}。
+
+    明细记录按课节展示用：与 get_oj_for_students 不同，这里不取「最新一条」，
+    而是保留每位学生每个课节的 OJ 通过数（总数据源 oj_results，总数写死 OJ_TOTAL）。
+    """
+    from parser import OJ_TOTAL
+
+    if not names:
+        return {}
+    conn = get_conn()
+    marks = ",".join("?" for _ in names)
+    rows = conn.execute(
+        f"SELECT student_name, lesson_name, hw_passed, ext_passed FROM oj_results "
+        f"WHERE student_name IN ({marks})",
+        list(names),
+    ).fetchall()
+    conn.close()
+    return {
+        (r["student_name"], r["lesson_name"]): {
+            "hw_passed": r["hw_passed"], "hw_total": OJ_TOTAL,
+            "ext_passed": r["ext_passed"], "ext_total": OJ_TOTAL,
+        }
+        for r in rows
+    }
+
+
+def get_quiz_map_for_rows(names):
+    """返回 {(学生姓名, 课节名称): {"correct": 对题数, "total": 总题数}}（仅课堂小测）。
+
+    明细记录展示用：按课堂小测题号前缀汇总该生该课节的对错行。
+    """
+    if not names:
+        return {}
+    conn = get_conn()
+    marks = ",".join("?" for _ in names)
+    rows = conn.execute(
+        f"""SELECT student_name, lesson_name,
+                   SUM(CASE WHEN result = '对' THEN 1 ELSE 0 END) AS correct,
+                   COUNT(*) AS total
+            FROM achievement_results
+            WHERE student_name IN ({marks}) AND question_key LIKE '课堂小测%'
+            GROUP BY student_name, lesson_name""",
+        list(names),
+    ).fetchall()
+    conn.close()
+    return {
+        (r["student_name"], r["lesson_name"]): {"correct": r["correct"], "total": r["total"]}
+        for r in rows
+    }
 
 
 def get_achievement_for_students(names, lesson_name=None):
@@ -778,7 +929,8 @@ def get_achievement_for_students(names, lesson_name=None):
         lessons = {st["lesson_name"] for st in result.values()}
         marks = ",".join("?" for _ in lessons)
         qrows = conn.execute(
-            f"SELECT lesson_name, question_key, qtype FROM question_templates WHERE lesson_name IN ({marks})",
+            f"SELECT lesson_name, question_key, qtype FROM question_templates WHERE lesson_name IN ({marks}) "
+            "AND question_key NOT IN ('课后作业OJ', '课后拓展OJ')",  # OJ 模板占位行不是真实题目
             list(lessons),
         ).fetchall()
         lesson_qs = {}
@@ -796,26 +948,46 @@ def get_achievement_for_students(names, lesson_name=None):
             st["missing"] = missing
         for st in result.values():
             st.pop("_answered", None)
-        # 合并 OJ 通过数（班级数据导出），评价生成时作为课后作业/拓展的真实参数
-        oj_all = get_oj_for_students(list(names))
-        for name, oj in oj_all.items():
-            st = result.get(name)
-            if st is None:
-                # 只有 OJ 数据、没有逐题作答记录的学生：生成桩条目，保证 OJ 参数可见
-                result[name] = {
-                    "lesson_name": oj.get("lesson_name", ""), "lesson_time": "",
-                    "score_rate": 0, "correct_count": 0, "wrongs": [],
-                    "missing": [], "oj": oj,
-                }
-                continue
-            st["oj"] = oj
-            # OJ 数据已覆盖课后作业/课后拓展：通过数=总数代表全部完成且正确，
-            # 逐题明细里没有对应行（无错题记录）属正常，不得按「未作答」误报提醒；
-            # 未全对时的提醒由 OJ 通过数行（📘）负责，避免重复
-            st["missing"] = [
-                c for c in st.get("missing", [])
-                if "作业" not in c and "拓展" not in c
-            ]
+    # 合并 OJ 通过数（班级数据导出），评价生成时作为课后作业/拓展的真实参数。
+    # 放在 if result 之外：全班都没有课测行、只有 OJ 数据时同样要建桩条目，
+    # 保证 {课后作业OJ}/{课后拓展OJ} 参数与未交提醒模板可用。
+    oj_all = get_oj_for_students(list(names))
+    for name, oj in oj_all.items():
+        st = result.get(name)
+        if st is None:
+            # 只有 OJ 数据、没有逐题作答记录的学生：生成桩条目，保证 OJ 参数可见
+            result[name] = {
+                "lesson_name": oj.get("lesson_name", ""), "lesson_time": "",
+                "score_rate": 0, "correct_count": 0, "wrongs": [],
+                "missing": [], "oj": oj,
+            }
+            continue
+        st["oj"] = oj
+        # OJ 数据已覆盖课后作业/课后拓展：通过数=总数代表全部完成且正确，
+        # 逐题明细里没有对应行（无错题记录）属正常，不得按「未作答」误报提醒；
+        # 未全对时的提醒由 OJ 通过数行（📘）负责，避免重复
+        st["missing"] = [
+            c for c in st.get("missing", [])
+            if "作业" not in c and "拓展" not in c
+        ]
+    # OJ 未交提醒模板（与错题讲评模板同表存储，question_key = 课后作业OJ / 课后拓展OJ）
+    oj_lessons = {st["lesson_name"] for st in result.values() if st.get("lesson_name")}
+    if oj_lessons:
+        marks = ",".join("?" for _ in oj_lessons)
+        trows = conn.execute(
+            f"""SELECT lesson_name, question_key, reply_template FROM question_templates
+                WHERE lesson_name IN ({marks})
+                  AND question_key IN ('课后作业OJ', '课后拓展OJ')""",
+            list(oj_lessons),
+        ).fetchall()
+        for st in result.values():
+            for t in trows:
+                if st.get("lesson_name") != t["lesson_name"]:
+                    continue
+                if t["question_key"] == "课后作业OJ":
+                    st["oj_tpl_hw"] = t["reply_template"] or ""
+                else:
+                    st["oj_tpl_ext"] = t["reply_template"] or ""
     conn.close()
     return result
 

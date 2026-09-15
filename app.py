@@ -30,6 +30,7 @@ from datastore import (
     get_previous_evals_by_student, get_history_evaluations,
     save_achievement, get_achievement_questions, save_question_template,
     save_oj_results,
+    get_oj_map_for_rows, get_quiz_map_for_rows,
     get_achievement_for_students, list_achievement_lessons,
 )
 from parser import (
@@ -115,6 +116,27 @@ def index():
         progress = progress_for_class(records, roster)   # 进步曲线数据
         rankings = rankings_for_class(records)           # 本班各课节正确率/奖杯排行
         selected_student = request.args.get("student", "").strip()
+        # 明细记录按开课时间倒序展示（最新课节在最上面）；汇总/曲线/排行已在上面算完，不受影响
+        records.sort(key=lambda r: str(r.get("开课时间") or ""), reverse=True)
+        # 明细记录补充三列：课堂小测对错汇总 + 课后作业/拓展 OJ 通过数（按 学生+课节 匹配）
+        names = sorted({r["学生姓名"] for r in records})
+        oj_map = get_oj_map_for_rows(names)
+        quiz_map = get_quiz_map_for_rows(names)
+        for r in records:
+            oj = oj_map.get((r["学生姓名"], r["课节名称"]))
+            r["课后作业OJ"] = (
+                {"text": f"{oj['hw_passed']}/{oj['hw_total']}",
+                 "ok": oj["hw_passed"] >= oj["hw_total"]} if oj else None
+            )
+            r["课后拓展OJ"] = (
+                {"text": f"{oj['ext_passed']}/{oj['ext_total']}",
+                 "ok": oj["ext_passed"] >= oj["ext_total"]} if oj else None
+            )
+            quiz = quiz_map.get((r["学生姓名"], r["课节名称"]))
+            r["课堂小测"] = (
+                {"text": f"{quiz['correct']}/{quiz['total']}",
+                 "ok": quiz["correct"] >= quiz["total"]} if quiz else None
+            )
         evaluations = get_evaluations(cid)              # 最新一批评价
         history_evaluations = get_history_evaluations(cid)  # 全部历史评价（按批次）
         achievement_questions = get_achievement_questions(cid)  # 课测题目与讲评模板（仅本班学生）
@@ -607,11 +629,30 @@ def _monitor_loop():
 if __name__ == "__main__":
     host, port = "127.0.0.1", 5000
     url = f"http://{host}:{port}/"
+
+    def _warn_existing_instance():
+        """已有实例在运行时弹窗提示（否则用户双击新 EXE 会静默退出，
+        浏览器打开的是旧进程页面——旧版功能缺失时极难排查）。"""
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "已有「学生课堂数据整合系统」实例在运行，本次启动已退出。\n\n"
+                "如果打开的页面缺少新功能（如明细记录新增列），说明运行中的是旧版本：\n"
+                "请先在任务管理器结束旧的「学生课堂数据整合系统.exe」进程，"
+                "再重新打开本程序。",
+                "学生课堂数据整合系统",
+                0x40000 | 0x30,  # MB_TOPMOST | MB_ICONWARNING
+            )
+        except Exception:
+            pass  # 弹窗失败不影响打开已有页面
+
     if getattr(sys, "frozen", False):
         # 单实例：已有实例则只打开已有页面，不重复起服务
         inst = _SingleInstance(_LOCK_PATH)
         if not inst.acquire():
             threading.Timer(0.3, lambda: webbrowser.open(url)).start()
+            threading.Timer(0.5, _warn_existing_instance).start()
             sys.exit(0)
         try:
             from werkzeug.serving import make_server
@@ -619,6 +660,7 @@ if __name__ == "__main__":
         except OSError:
             # 端口被占用（如历史残留进程）：打开已有页面后退出
             threading.Timer(0.3, lambda: webbrowser.open(url)).start()
+            threading.Timer(0.5, _warn_existing_instance).start()
             sys.exit(0)
         _server_started = time.time()
         _server_handle = server
