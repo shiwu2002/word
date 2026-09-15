@@ -117,7 +117,7 @@ def index():
         selected_student = request.args.get("student", "").strip()
         evaluations = get_evaluations(cid)              # 最新一批评价
         history_evaluations = get_history_evaluations(cid)  # 全部历史评价（按批次）
-        achievement_questions = get_achievement_questions()  # 课测题目与讲评模板
+        achievement_questions = get_achievement_questions(cid)  # 课测题目与讲评模板（仅本班学生）
         achievement_lessons = list_achievement_lessons()    # 课测课节列表（评价数据来源选择）
 
     return render_template(

@@ -597,13 +597,21 @@ def list_achievement_lessons():
     return [dict(r) for r in rows]
 
 
-def get_achievement_questions():
-    """全部课节的题目与讲评模板（评价页编辑用），按课节时间倒序分组。
+def get_achievement_questions(class_id=None):
+    """课节的题目与讲评模板（评价页编辑用），按课节时间倒序分组。
 
+    传 class_id 时只保留该班名单内学生的答错记录（模板本身仍全局共享）；
+    过滤后无本班学生且未配模板的题目不再展示。
     返回 [{lesson_name, lesson_time, questions: [...]}]，question 含
     reply_template 与 wrong_students（已解析成 [{name, choice}]）。
     """
     conn = get_conn()
+    roster = None
+    if class_id:
+        rrows = conn.execute(
+            "SELECT name FROM students WHERE class_id=?", (class_id,)
+        ).fetchall()
+        roster = {r["name"] for r in rrows}
     rows = conn.execute(
         """SELECT t.*, t.question_text AS stem, MAX(a.lesson_time) AS lesson_time
            FROM question_templates t
@@ -616,7 +624,12 @@ def get_achievement_questions():
     lessons, lesson_map = [], {}
     for r in rows:
         q = dict(r)
-        q["wrong_students"] = json.loads(q["wrong_students"] or "[]")
+        wrong = json.loads(q["wrong_students"] or "[]")
+        if roster is not None:
+            wrong = [w for w in wrong if w.get("name") in roster]
+            if not wrong and not (q["reply_template"] or "").strip():
+                continue  # 与本班无关且未配模板的题目不展示
+        q["wrong_students"] = wrong
         lesson = lesson_map.get(q["lesson_name"])
         if not lesson:
             lesson = {"lesson_name": q["lesson_name"], "lesson_time": q["lesson_time"], "questions": []}
