@@ -227,12 +227,23 @@ def import_roster(classes_data):
 
     - 班级名已存在 → 替换其名单（删旧插新），保留课时版本数据。
     - 班级名不存在 → 新建班级并写入名单。
-    返回 [{name, student_count, created}]。
+    - 推班迁移：名单落库后按新旧名单差异迁移课时数据（见 _migrate_promotions）。
+    返回 (result, migrations)：
+      result: [{name, student_count, created}]
+      migrations: [迁移说明字符串]，供页面 flash 提示。
     """
     now = _now()
     result = []
     conn = get_conn()
     try:
+        # 替换名单前先快照各正式班现有学生：{学生姓名: {class_id, ...}}，用于判定推班
+        old_map = {}
+        for r in conn.execute(
+            """SELECT s.name, s.class_id FROM students s
+               JOIN classes c ON s.class_id = c.id WHERE c.name <> ?""",
+            (DEFAULT_CLASS_NAME,),
+        ):
+            old_map.setdefault(r["name"], set()).add(r["class_id"])
         for item in classes_data:
             name = item["name"]
             students = item.get("students", [])
@@ -260,7 +271,103 @@ def import_roster(classes_data):
         conn.commit()
     finally:
         conn.close()  # 无论是否异常都关闭连接
-    return result
+    migrations = _migrate_promotions(old_map)  # 名单落库后再迁移课时数据
+    return result, migrations
+
+
+def _migrate_promotions(old_map):
+    """名单导入后的课时数据迁移（推班 / 认领 / 留存）。
+
+    规则（与「默认名单被正式班认领则迁移」的既有语义一致）：
+    1. 推班：学生从 A 班旧名单消失且出现在 B 班新名单 → 课时数据从 A 班剥离、合入 B 班。
+    2. 留存：学生离开所有正式班 → 课时数据转入「默认名单」，不丢数据。
+    3. 认领：「默认名单」中的学生出现在新正式班名单 → 立即迁移到正式班。
+    返回迁移说明列表（给页面 flash 用）。
+    """
+    from parser import merge_records  # 局部导入避免潜在循环依赖（同 _normalize_lesson_names）
+
+    conn = get_conn()
+    new_map = {}
+    for r in conn.execute(
+        """SELECT s.name, s.class_id FROM students s
+           JOIN classes c ON s.class_id = c.id WHERE c.name <> ?""",
+        (DEFAULT_CLASS_NAME,),
+    ):
+        new_map.setdefault(r["name"], set()).add(r["class_id"])
+    conn.close()
+
+    def cname(cid):
+        c = get_class(cid)
+        return c["name"] if c else str(cid)
+
+    migrations = []
+
+    # 规则 1/2：新旧正式班名单对比
+    for name in sorted(set(old_map) | set(new_map)):
+        old_cids = old_map.get(name, set())
+        new_cids = new_map.get(name, set())
+        leaves = sorted(old_cids - new_cids)   # 旧班中已不在新名单的
+        joins = sorted(new_cids - old_cids)    # 新加入的正式班
+        if not leaves:
+            continue
+        # 从旧班剥离该生记录（生成新版本快照）
+        moved_records = []
+        stripped_from = []
+        for old_cid in leaves:
+            records, _ = get_current_records(old_cid)
+            student_records = [r for r in records if r["学生姓名"] == name]
+            if not student_records:
+                continue  # 该生在旧班没有课时数据，无需动版本
+            kept = [r for r in records if r["学生姓名"] != name]
+            save_version(old_cid, kept, "名单导入推班迁移", 0, 0)
+            moved_records += student_records
+            stripped_from.append(cname(old_cid))
+        if not stripped_from:
+            continue
+        # 目标：新加入的正式班；一个都没进 → 转入默认名单留存
+        to_default = not joins
+        if to_default:
+            default_cid, _ = get_or_create_default_class()
+            add_students_to_class(default_cid, [name])
+            targets = [default_cid]
+        else:
+            targets = joins
+        for cid in targets:
+            existing, _ = get_current_records(cid)
+            merged, n_new, n_upd = merge_records(existing, moved_records)
+            save_version(cid, merged, "名单导入推班迁移", n_new, n_upd)
+        if to_default:
+            migrations.append(
+                f"{name}：已离开 {'、'.join(stripped_from)}，课时数据转入「默认名单」留存"
+            )
+        else:
+            migrations.append(
+                f"{name}：{'、'.join(stripped_from)} → "
+                f"{'、'.join(cname(c) for c in targets)}，课时数据已随迁"
+            )
+
+    # 规则 3：默认名单学生被正式班认领 → 立即迁移
+    default_cid = get_default_class_id()
+    if default_cid:
+        claimed = [n for n in get_roster(default_cid) if n in new_map]
+        if claimed:
+            remove_students_from_class(default_cid, claimed)
+            default_records, _ = get_current_records(default_cid)
+            kept = [r for r in default_records if r["学生姓名"] not in set(claimed)]
+            if len(kept) != len(default_records):
+                save_version(default_cid, kept, "名单导入认领迁移", 0, 0)
+            for name in claimed:
+                student_records = [r for r in default_records if r["学生姓名"] == name]
+                dst = "、".join(cname(c) for c in sorted(new_map[name]))
+                if student_records:
+                    for cid in sorted(new_map[name]):
+                        existing, _ = get_current_records(cid)
+                        merged, n_new, n_upd = merge_records(existing, student_records)
+                        save_version(cid, merged, "名单导入认领迁移", n_new, n_upd)
+                    migrations.append(f"{name}：已从「默认名单」迁入 {dst}（含课时数据）")
+                else:
+                    migrations.append(f"{name}：已从「默认名单」认领至 {dst}")
+    return migrations
 
 
 def get_roster(cid):
@@ -346,6 +453,103 @@ def remove_students_from_class(cid, names):
         conn.execute("DELETE FROM students WHERE class_id=? AND name=?", (cid, name))
     conn.commit()
     conn.close()
+
+
+def add_student_to_roster(cid, name):
+    """班级内手动新增学生：登记名单；若该生在「默认名单」（含历史课时）则一并迁入本班。
+
+    返回 (already_in_class, migrated, others)：
+      already_in_class: 该生是否已在本班名单中（是则不做任何修改）
+      migrated: 是否发生了「默认名单 → 本班」的课时数据迁移
+      others: 该生同时在册的其他正式班 [{id, name}]（提示推班场景用）
+    """
+    conn = get_conn()
+    dup = conn.execute(
+        "SELECT 1 FROM students WHERE class_id=? AND name=?", (cid, name)
+    ).fetchone()
+    others = [
+        {"id": r["id"], "name": r["name"]}
+        for r in conn.execute(
+            """SELECT c.id, c.name FROM students s
+               JOIN classes c ON s.class_id = c.id
+               WHERE s.name = ? AND s.class_id <> ? AND c.name <> ?""",
+            (name, cid, DEFAULT_CLASS_NAME),
+        )
+    ]
+    conn.close()
+    if dup:
+        return True, False, others
+
+    add_students_to_class(cid, [name])
+    migrated = False
+    default_cid = get_default_class_id()
+    if default_cid and name in get_roster(default_cid):
+        remove_students_from_class(default_cid, [name])
+        default_records, _ = get_current_records(default_cid)
+        student_records = [r for r in default_records if r["学生姓名"] == name]
+        if student_records:
+            from parser import merge_records
+
+            kept = [r for r in default_records if r["学生姓名"] != name]
+            save_version(default_cid, kept, "手动新增学生迁移", 0, 0)
+            existing, _ = get_current_records(cid)
+            merged, n_new, n_upd = merge_records(existing, student_records)
+            save_version(cid, merged, "手动新增学生迁移", n_new, n_upd)
+            migrated = True
+    return False, migrated, others
+
+
+def remove_student_from_roster(cid, name):
+    """班级内手动删除学生：仅删名单行，课时数据随名单走、不丢失。
+
+    - 该生同时在其他正式班名单 → 课时数据剥离本班、合入那些班（记录始终跟随在册班级）。
+    - 否则 → 课时数据转入「默认名单」留存；日后再次加入正式班会自动随迁。
+    返回 (existed, note)：existed 是否确有该生；note 为迁移说明（可能为空）。
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM students WHERE class_id=? AND name=?", (cid, name)
+    ).fetchone()
+    other_cids = sorted(
+        {
+            r["class_id"]
+            for r in conn.execute(
+                """SELECT s.class_id FROM students s
+                   JOIN classes c ON s.class_id = c.id
+                   WHERE s.name = ? AND s.class_id <> ? AND c.name <> ?""",
+                (name, cid, DEFAULT_CLASS_NAME),
+            )
+        }
+    )
+    conn.close()
+    if not row:
+        return False, ""
+
+    conn = get_conn()
+    conn.execute("DELETE FROM students WHERE class_id=? AND name=?", (cid, name))
+    conn.commit()
+    conn.close()
+
+    records, _ = get_current_records(cid)
+    student_records = [r for r in records if r["学生姓名"] == name]
+    if not student_records:
+        return True, ""  # 名单行已删，无课时数据可迁
+    from parser import merge_records
+
+    kept = [r for r in records if r["学生姓名"] != name]
+    save_version(cid, kept, "删除学生迁移", 0, 0)
+    if other_cids:
+        for t in other_cids:
+            existing, _ = get_current_records(t)
+            merged, n_new, n_upd = merge_records(existing, student_records)
+            save_version(t, merged, "删除学生迁移", n_new, n_upd)
+        return True, "该生课时数据已迁至其在册的其他班级"
+    default_cid, _ = get_or_create_default_class()
+    add_students_to_class(default_cid, [name])
+    existing, _ = get_current_records(default_cid)
+    merged, n_new, n_upd = merge_records(existing, student_records)
+    save_version(default_cid, merged, "删除学生迁入默认名单", n_new, n_upd)
+    return True, "该生课时数据已转入「默认名单」留存，再次加入班级时会自动随迁"
 
 
 # ---------------- 版本快照 ----------------

@@ -36,7 +36,7 @@
       <div class="card-head">
         <h2>导入 / 更新名单</h2>
       </div>
-      <p class="muted">上传名单 Excel 文件，<strong>每个工作表会创建/更新一个班级（工作表名即班名）</strong>。学生姓名列需为「学生姓名 / 学员姓名 / 姓名」之一。班级已存在则替换其名单（保留已合并的课时数据）。</p>
+      <p class="muted">上传名单 Excel 文件，<strong>每个工作表会创建/更新一个班级（工作表名即班名）</strong>。学生姓名列需为「学生姓名 / 学员姓名 / 姓名」之一。班级已存在则替换其名单（保留已合并的课时数据）。<strong>推班的学生课时数据会自动随迁到新班级</strong>；离开所有班级的学生转入「默认名单」留存。</p>
       <form method="post" action="{{ url_for('roster_import') }}" enctype="multipart/form-data" class="upload-form">
         <input type="file" name="file" accept=".xlsx,.xls" required>
         <button class="btn btn-primary" type="submit">导入名单</button>
@@ -116,11 +116,31 @@
         <a class="btn btn-primary" href="{{ url_for('classes_export', cid=current_class.id) }}">导出 Excel</a>
       </div>
 
+      {% if current_class.name != '默认名单' %}
+      <form method="post" action="{{ url_for('students_add', cid=current_class.id) }}" class="inline-form roster-add">
+        <label class="muted">新增学生</label>
+        <input type="text" name="name" placeholder="输入学生姓名" required>
+        <button class="btn btn-small btn-primary" type="submit">加入名单</button>
+        <span class="muted small">若其在「默认名单」有历史课时数据，会自动迁入本班</span>
+      </form>
+      {% endif %}
+
       {% if roster %}
       <details class="roster-fold">
-        <summary>学生名单（{{ roster|length }} 人，点击展开/收起）</summary>
+        <summary>学生名单（{{ roster|length }} 人，点击展开/收起{% if current_class.name != '默认名单' %}，点姓名旁的 × 可移出名单{% endif %}）</summary>
         <div class="roster-chips">
-          {% for name in roster %}<span class="chip">{{ name }}</span>{% endfor %}
+          {% for name in roster %}
+          <span class="chip">
+            {{ name }}
+            {% if current_class.name != '默认名单' %}
+            <form class="chip-del" method="post" action="{{ url_for('students_remove', cid=current_class.id) }}"
+                  onsubmit="return confirm('将 {{ name }} 移出「{{ current_class.name }}」名单？其课时数据会自动迁入其在册的其他班级，或转入「默认名单」留存。');">
+              <input type="hidden" name="name" value="{{ name }}">
+              <button type="submit" title="移出名单">×</button>
+            </form>
+            {% endif %}
+          </span>
+          {% endfor %}
         </div>
       </details>
 
@@ -151,7 +171,7 @@
       </div>
       <div class="pager-slot"></div>
       {% else %}
-        <p class="empty">该班级名单为空，请到「数据导入」标签导入名单。</p>
+        <p class="empty">该班级名单为空，可在上方「新增学生」加入学生。</p>
       {% endif %}
     </div>
   </section>

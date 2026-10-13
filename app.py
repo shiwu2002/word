@@ -24,6 +24,7 @@ import datastore
 from datastore import (
     init_db, list_classes, get_class, rename_class, delete_class,
     import_roster, get_roster,
+    add_student_to_roster, remove_student_from_roster,
     get_current_records, list_versions, rollback,
     get_setting, set_setting, get_api_key, get_model_name,
     save_evaluations, get_evaluations,
@@ -192,7 +193,7 @@ def roster_import():
         flash("未在名单文件中找到任何学生姓名列（需有“学生姓名/学员姓名”列）", "error")
         return redirect(url_for("index"))
 
-    result = import_roster(valid)
+    result, migrations = import_roster(valid)
     created = [r for r in result if r["created"]]
     updated = [r for r in result if not r["created"]]
     msg = f"名单导入完成：共 {len(result)} 个班级"
@@ -201,6 +202,8 @@ def roster_import():
     if updated:
         msg += "；更新 " + "、".join(f"{r['name']}({r['student_count']}人)" for r in updated)
     flash(msg, "success")
+    for m in migrations:  # 推班/认领/留存的课时数据迁移说明
+        flash(m, "info")
     if skipped_sheets:
         flash(f"以下工作表未找到姓名列已跳过：{'、'.join(skipped_sheets)}", "error")
     return redirect(url_for("index"))
@@ -357,6 +360,75 @@ def classes_delete(cid):
             session.pop("class_id", None)
         flash(f"已删除班级：{cls['name']}（含名单与全部版本数据）", "success")
     return redirect(url_for("index"))
+
+
+# ---------------- 班级内手动新增 / 删除学生 ----------------
+
+@app.route("/classes/<int:cid>/students/add", methods=["POST"])
+def students_add(cid):
+    """在当前班级手动新增一个学生。
+
+    若该生原本在「默认名单」（含历史课时数据），会自动迁移到本班——
+    与上传课时时的认领迁移语义一致。
+    """
+    cls = get_class(cid)
+    name = request.form.get("name", "").strip()
+    if not cls:
+        flash("班级不存在", "error")
+        return redirect(url_for("index"))
+    if not name:
+        flash("请输入学生姓名", "error")
+        return redirect(url_for("index", class_id=cid))
+    if cls["name"] == "默认名单":
+        flash("「默认名单」由系统自动管理，请在正式班级中新增学生", "error")
+        return redirect(url_for("index", class_id=cid))
+
+    already, migrated, others = add_student_to_roster(cid, name)
+    if already:
+        flash(f"{name} 已在「{cls['name']}」名单中", "error")
+    else:
+        msg = f"已将 {name} 加入「{cls['name']}」名单"
+        if migrated:
+            msg += "，其历史课时数据已从「默认名单」迁入"
+        flash(msg, "success")
+    if others:
+        # 提示该生同时在其他班在册：若是推班，请把旧班名单中的同名学生移除
+        flash(
+            f"注意：{name} 同时在 "
+            + "、".join(o["name"] for o in others)
+            + " 名单中；若是推班，请在旧班级的学生名单里将其移除，课时数据会自动随迁",
+            "info",
+        )
+    return redirect(url_for("index", class_id=cid))
+
+
+@app.route("/classes/<int:cid>/students/remove", methods=["POST"])
+def students_remove(cid):
+    """从当前班级名单移除一个学生（推班 / 退课场景）。
+
+    仅删名单行：课时数据自动迁到该生在册的其他班级；不在任何班级时转入「默认名单」留存。
+    """
+    cls = get_class(cid)
+    name = request.form.get("name", "").strip()
+    if not cls:
+        flash("班级不存在", "error")
+        return redirect(url_for("index"))
+    if not name:
+        flash("缺少学生姓名", "error")
+        return redirect(url_for("index", class_id=cid))
+    if cls["name"] == "默认名单":
+        flash("「默认名单」由系统自动管理，不能手动移除学生", "error")
+        return redirect(url_for("index", class_id=cid))
+
+    existed, note = remove_student_from_roster(cid, name)
+    if not existed:
+        flash(f"{name} 不在「{cls['name']}」名单中", "error")
+    else:
+        msg = f"已将 {name} 移出「{cls['name']}」名单"
+        if note:
+            msg += f"（{note}）"
+        flash(msg, "success")
+    return redirect(url_for("index", class_id=cid))
 
 
 # ---------------- 回退 ----------------
